@@ -41,7 +41,7 @@ def detailed(report: ClientReport) -> str:
         f"Сравнение: {report.period.previous.label()}",
         f"Общий статус: {ICONS.get(report.level, '⚪')} {STATUS_NAMES.get(report.status, report.status)}",
         "",
-        "Ключевые показатели (расчёт backend):",
+        "Ключевые показатели:",
     ]
     for key, title in METRIC_NAMES.items():
         diff = report.changes[key]["percent"]
@@ -122,9 +122,19 @@ def compact(
             healthy += 1
             continue
         lines.append(f"{ICONS.get(report.level, '⚪')} {report.client_name}")
-        lines.append(
-            f"Расход {fmt(report.current.spend)} ₽; конверсии {fmt(report.current.conversions)}; CPA {fmt(report.current.cpa)} ₽."
-        )
+        for key in (
+            "spend",
+            "impressions",
+            "clicks",
+            "ctr",
+            "cpc",
+            "conversions",
+            "cr",
+            "cpa",
+            "revenue",
+            "drr",
+        ):
+            lines.append(f"{METRIC_NAMES[key]}: {fmt(getattr(report.current, key))}")
         lines += [s.message for s in report.signals[:2]]
         unavailable = [
             key for key, value in report.source_status.items() if value not in ("ok", "not_checked")

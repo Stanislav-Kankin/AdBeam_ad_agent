@@ -78,6 +78,44 @@ def test_telegram_splitting_unicode_preserves_content():
     assert len(parts) > 3
 
 
+def test_report_entities_preserve_unicode_and_literal_markup():
+    from app.bot.report_message import report_entities
+
+    text = "📊 AdBeam\n<клиент & название>\nКлики: 100,00\nCPA, ₽: 30,00"
+    raw = text.encode("utf-16-le")
+    spans = [
+        raw[e.offset * 2 : (e.offset + e.length) * 2].decode("utf-16-le")
+        for e in report_entities(text)
+    ]
+    assert spans == ["📊 AdBeam", "Клики: 100,00", "CPA, ₽: 30,00"]
+
+
+async def test_progress_is_replaced_and_cannot_overwrite_report(monkeypatch):
+    from app.bot import report_message
+
+    monkeypatch.setattr(report_message, "PROGRESS_INTERVAL", 0.01)
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        presentation = report_message.ReportMessage(message_update("/check").message.as_(bot))
+        await presentation.start({"stage": "Загрузка Метрики"})
+        await asyncio.sleep(0.04)
+        assert any(
+            isinstance(m, EditMessageText) and "Загрузка Метрики" in m.text for m in session.sent
+        )
+        text = "Клики: 100,00\n" + "Данные 🚀\n" * 600
+        await presentation.finish(text)
+        count = len(session.sent)
+        await asyncio.sleep(0.03)
+        assert len(session.sent) == count
+        edits = [m for m in session.sent if isinstance(m, EditMessageText)]
+        assert edits[-1].text.startswith("Клики: 100,00")
+        assert edits[-1].entities[0].type == "bold"
+        assert edits[-1].parse_mode is None
+        # First report chunk replaces the status; remaining chunks are sent afterward.
+        sends = [m for m in session.sent if isinstance(m, SendMessage)]
+        assert edits[-1].text + "".join(m.text for m in sends[1:]) == text
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -99,7 +137,9 @@ async def test_telegram_commands_and_free_text_end_to_end(runtime, text):
         await dp.feed_update(bot, message_update(text))
         await runtime.jobs.close()
     assert session.sent
-    content = "\n".join(m.text for m in session.sent if isinstance(m, SendMessage))
+    content = "\n".join(
+        m.text for m in session.sent if isinstance(m, (SendMessage, EditMessageText))
+    )
     assert "не завершилась" not in content and "Не удалось" not in content
     if text.startswith(("/check ", "/check_all")):
         assert "Проверка началась" in content and "MOCK" in content

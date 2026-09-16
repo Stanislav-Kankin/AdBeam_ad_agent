@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import secrets
 from time import monotonic
 
@@ -12,6 +11,7 @@ from app.analytics.progress import progress_state
 from app.bot.commands import HELP, parse_command
 from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
+from app.bot.report_message import ReportMessage, report_entities
 from app.domain.reports import CheckMode, TriggerSource
 from app.reporting.formatter import split_message
 
@@ -24,7 +24,9 @@ async def send_text(bot, chat_id, text):
 async def send_part(bot, chat_id, text):
     for attempt in range(3):
         try:
-            return await bot.send_message(chat_id, text, parse_mode=None)
+            return await bot.send_message(
+                chat_id, text, parse_mode=None, entities=report_entities(text)
+            )
         except TelegramRetryAfter as exc:
             if attempt == 2 or exc.retry_after > 60:
                 raise
@@ -39,25 +41,13 @@ def build_dispatcher(runtime):
     pending = {}
 
     async def launch(message, user_id, client_ids, period, mode):
+        presentation = ReportMessage(message)
+
         async def work():
             state = {"stage": "ожидаю свободного места в очереди"}
             token = progress_state.set(state)
-            started = monotonic()
-
-            async def notify_progress():
-                while True:
-                    await asyncio.sleep(20)
-                    try:
-                        async with asyncio.timeout(5):
-                            await message.answer(
-                                f"⏳ {int(monotonic() - started)} с: {state['stage']}."
-                            )
-                    except Exception:
-                        logging.getLogger(__name__).warning("Could not deliver check progress")
-
-            pulse = asyncio.create_task(notify_progress())
             try:
-                await message.answer("Проверка началась. Пришлю результат сюда.")
+                await presentation.start(state)
                 _, text = await runtime.checks.run_check(
                     client_ids,
                     make_period(period),
@@ -66,14 +56,13 @@ def build_dispatcher(runtime):
                     chat_id=message.chat.id,
                 )
                 state["stage"] = "отправляю результат"
-                await send_text(message.bot, message.chat.id, text)
+                await presentation.finish(text)
             finally:
-                pulse.cancel()
-                await asyncio.gather(pulse, return_exceptions=True)
+                await presentation.stop()
                 progress_state.reset(token)
 
         async def failed():
-            await message.answer(
+            await presentation.finish(
                 "Проверка не завершилась. Попробуйте позже; ошибка записана в журнал."
             )
 
