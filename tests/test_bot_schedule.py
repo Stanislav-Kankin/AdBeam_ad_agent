@@ -5,7 +5,13 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery, EditMessageReplyMarkup, GetMe, SendMessage
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageReplyMarkup,
+    EditMessageText,
+    GetMe,
+    SendMessage,
+)
 from aiogram.types import Chat, Message, Update, User
 
 from app.bot.commands import parse_command
@@ -29,7 +35,7 @@ class FakeTelegram(BaseSession):
             return User(id=555, is_bot=True, first_name="Test", username="adbeam_test_bot")
         if isinstance(method, AnswerCallbackQuery):
             return True
-        if isinstance(method, SendMessage | EditMessageReplyMarkup):
+        if isinstance(method, SendMessage | EditMessageReplyMarkup | EditMessageText):
             return Message(
                 message_id=len(self.sent),
                 date=datetime.now(UTC),
@@ -104,6 +110,85 @@ async def test_unknown_chats_silent(runtime):
     async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
         await build_dispatcher(runtime).feed_update(bot, message_update("/clients", chat=999))
     assert not session.sent
+
+
+@pytest.mark.parametrize("all_clients", [False, True])
+async def test_menu_report_flow_and_replay(runtime, all_clients):
+    from aiogram.types import CallbackQuery
+
+    session = FakeTelegram()
+    spy = AsyncMock(wraps=runtime.checks.run_check)
+    runtime.checks.run_check = spy
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+
+        async def click(label, user=1, data=None):
+            if data is None:
+                keyboard = session.sent[-1].reply_markup.inline_keyboard
+                data = next(b.callback_data for row in keyboard for b in row if label in b.text)
+            cb = CallbackQuery(
+                id="nav",
+                from_user=User(id=user, is_bot=False, first_name="U"),
+                chat_instance="test",
+                message=message_update("menu").message,
+                data=data,
+            )
+            await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+            return data
+
+        await dp.feed_update(bot, message_update("/menu"))
+        if all_clients:
+            await click("Аналитика всех")
+        else:
+            await click("Клиенты")
+            await click("West")
+        await click("Краткая")
+        token = session.sent[-1].reply_markup.inline_keyboard[2][0].callback_data
+        await click("", user=2, data=token)
+        assert session.sent[-1].show_alert
+        assert not spy.called
+        await click("", data=token)
+        await runtime.jobs.close()
+        assert spy.call_count == 1
+        assert spy.call_args.args[1].current.days == 14
+        assert spy.call_args.args[2] == "summary"
+        assert len(spy.call_args.args[0]) == (3 if all_clients else 1)
+        await click("", data=token)
+        assert session.sent[-1].show_alert
+        assert spy.call_count == 1
+
+
+async def test_menu_pagination_and_cancel(runtime):
+    from aiogram.types import CallbackQuery
+
+    template = next(iter(runtime.registry.clients.values()))
+    runtime.registry.clients = {
+        str(i): template.model_copy(update={"id": str(i), "name": f"Client {i}"}) for i in range(19)
+    }
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+        await dp.feed_update(bot, message_update("/clients"))
+        assert "Страница 1 из 3" in session.sent[-1].text
+        keyboard = session.sent[-1].reply_markup.inline_keyboard
+        assert sum(b.text.startswith("Client") for row in keyboard for b in row) == 8
+        token = next(b.callback_data for row in keyboard for b in row if "Вперёд" in b.text)
+        cb = CallbackQuery(
+            id="page",
+            from_user=User(id=1, is_bot=False, first_name="U"),
+            chat_instance="test",
+            message=message_update("menu").message,
+            data=token,
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+        assert "Страница 2 из 3" in session.sent[-1].text
+        assert session.sent[-1].reply_markup.inline_keyboard[0][0].text == "Client 8"
+        token = session.sent[-1].reply_markup.inline_keyboard[0][0].callback_data
+        await dp.feed_update(bot, message_update("/cancel"))
+        await dp.feed_update(
+            bot, Update(update_id=3, callback_query=cb.model_copy(update={"data": token}))
+        )
+        assert session.sent[-1].show_alert
 
 
 async def test_inline_selection_preserves_mode_period_and_owner(runtime):

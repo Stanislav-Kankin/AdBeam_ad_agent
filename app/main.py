@@ -55,6 +55,7 @@ async def run_bot(runtime):
         runtime.schedule.start()
         commands = [
             ("start", "Начать"),
+            ("menu", "Главное меню"),
             ("help", "Помощь"),
             ("clients", "Клиенты"),
             ("check_all", "Проверить всех"),

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from app.analytics.periods import make_period
 
 HELP = """AdBeam Performance Analyst
+/menu — главное меню с кнопками
 /clients — доступные клиенты
 /check_all [7d|14d|yesterday] — проверка всех
 /check <клиент> [период] — подробная проверка

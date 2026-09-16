@@ -8,6 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.analytics.periods import make_period
 from app.bot.commands import HELP, parse_command
+from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
 from app.domain.reports import CheckMode, TriggerSource
 from app.reporting.formatter import split_message
@@ -56,6 +57,8 @@ def build_dispatcher(runtime):
             await message.answer(
                 "Проверка уже выполняется или все рабочие слоты заняты. Попробуйте чуть позже."
             )
+
+    show_menu, clear_menu = install_menu(router, runtime, launch)
 
     async def select_client(message, clients, command):
         expired = [k for k, v in pending.items() if monotonic() - v[0] > 600]
@@ -115,18 +118,14 @@ def build_dispatcher(runtime):
             if prefix.split("@", 1)[1].casefold() != me.username.casefold():
                 return
         name = prefix.split("@", 1)[0][1:]
-        if name in ("start", "help"):
+        if name in ("start", "menu"):
+            await show_menu(message, message.from_user.id)
+        elif name == "help":
             await message.answer(HELP)
         elif name == "clients":
-            clients = runtime.registry.visible(message.chat.id)
-            await send_text(
-                message.bot,
-                message.chat.id,
-                "Доступные клиенты:\n" + "\n".join(f"• {c.name} — {c.id}" for c in clients)
-                if clients
-                else "Нет доступных активных клиентов.",
-            )
+            await show_menu(message, message.from_user.id, screen="clients")
         elif name == "cancel":
+            clear_menu(message.chat.id, message.from_user.id)
             for key in [
                 k for k, v in pending.items() if v[1:3] == (message.chat.id, message.from_user.id)
             ]:
