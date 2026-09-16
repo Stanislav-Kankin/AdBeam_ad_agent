@@ -1,0 +1,271 @@
+import asyncio
+from datetime import UTC, datetime
+from decimal import Decimal
+from time import monotonic
+
+from app.analytics.metrics import calculate, change, compare
+from app.analytics.periods import today_moscow
+from app.analytics.rules import evaluate, tracking_health
+from app.domain.reports import CheckMode, ClientReport, DataStatus, Metrics, Signal, Totals
+from app.reporting.formatter import compact, detailed
+
+
+def snapshot_metrics(snapshot, *, healthy=True):
+    totals = snapshot.direct.totals.model_copy(deep=True)
+    if snapshot.direct.status != DataStatus.OK:
+        totals = Totals()
+    if not healthy or snapshot.metrica.status != DataStatus.OK or snapshot.metrica.missing_goal_ids:
+        totals.conversions = None
+    revenue = snapshot.revenue
+    totals.revenue = revenue.amount if revenue.status == DataStatus.OK else None
+    metrics = calculate(totals)
+    if not revenue.comparable or revenue.period != snapshot.direct.period:
+        metrics.drr = None
+    return metrics
+
+
+def drivers(current, previous):
+    if current.status != DataStatus.OK or previous.status != DataStatus.OK:
+        return []
+    now, before = {r.id: r for r in current.rows}, {r.id: r for r in previous.rows}
+    result = []
+    zero = Totals(spend=0, clicks=0, impressions=0, conversions=0)
+    for id_ in now.keys() | before.keys():
+        a, b = now.get(id_), before.get(id_)
+        cur, prev = a.totals if a else zero, b.totals if b else zero
+        result.append(
+            {
+                "id": id_,
+                "name": (a or b).name,
+                "spend_delta": change(cur.spend, prev.spend)["absolute"],
+                "conversions_delta": change(cur.conversions, prev.conversions)["absolute"],
+                "current": calculate(cur).model_dump(mode="json"),
+                "previous": calculate(prev).model_dump(mode="json"),
+            }
+        )
+    return sorted(result, key=lambda r: abs(r["spend_delta"] or 0), reverse=True)
+
+
+class CheckService:
+    def __init__(self, registry, provider, repository):
+        self.registry, self.provider, self.repository = registry, provider, repository
+        self.semaphore = asyncio.Semaphore(3)
+
+    async def snapshots(self, client, period):
+        return await asyncio.gather(
+            self.provider.snapshot(client, period.current),
+            self.provider.snapshot(client, period.previous),
+        )
+
+    async def analyze(self, client, period, mode):
+        async with self.semaphore:
+            current, previous = await self.snapshots(client, period)
+            health = tracking_health(client, current, previous, period)
+            a, b = snapshot_metrics(current, healthy=health["healthy"]), snapshot_metrics(previous)
+            signals = evaluate(client, a, b, period, health, current)
+            checks = {
+                "доступность": "ok" if health["healthy"] else "insufficient",
+                "основные цели": current.metrica.status.value,
+                "статусы кампаний": current.direct.campaigns_status.value,
+                "кампании": "not_checked",
+                "устройства": "not_checked",
+                "география": "not_checked",
+                "запросы": "not_checked",
+                "площадки": "not_checked",
+                "бюджет": "ok"
+                if client.targets.monthly_budget or client.targets.weekly_budget
+                else "not_checked",
+            }
+            limitations = [
+                *current.direct.limitations,
+                *current.metrica.limitations,
+                *previous.direct.limitations,
+                *previous.metrica.limitations,
+            ]
+            if not health["healthy"]:
+                limitations.append("CPA и CR не рассчитаны: доступность аналитики не подтверждена.")
+            mature = (
+                today_moscow() - period.current.end
+            ).days > client.targets.conversion_delay_days
+            if not mature:
+                limitations.append(
+                    f"Конверсии могут дополняться {client.targets.conversion_delay_days} дн.; сигналы CPA/CR и расхода без конверсий подавлены."
+                )
+            if (
+                current.revenue.status != DataStatus.OK
+                or not current.revenue.comparable
+                or a.drr is None
+            ):
+                limitations.append(
+                    "ДРР не рассчитан: "
+                    + (
+                        current.revenue.reason
+                        or "выручка отсутствует, равна нулю или несопоставима."
+                    )
+                )
+            if previous.direct.status != DataStatus.OK or previous.metrica.status != DataStatus.OK:
+                limitations.append(
+                    "Предыдущий период неполный или недоступен; сравнение ограничено."
+                )
+            if (a.clicks or 0) < client.targets.minimum_clicks:
+                limitations.append("Недостаточный объём кликов для выводов об эффективности.")
+            campaign_drivers = []
+            if mode != CheckMode.SUMMARY:
+                checks["кампании"] = current.direct.status.value
+                campaign_drivers = drivers(current.direct, previous.direct)[:10]
+                if not health["healthy"]:
+                    for row in campaign_drivers:
+                        row["conversions_delta"] = None
+                threshold = client.targets.minimum_spend_for_analysis
+                if client.targets.target_cpa:
+                    threshold = min(
+                        threshold,
+                        client.targets.target_cpa
+                        * Decimal(str(client.targets.no_conversion_cpa_multiple)),
+                    )
+                if mature and health["healthy"]:
+                    for row in current.direct.rows:
+                        if (
+                            row.totals.conversions == 0
+                            and (row.totals.spend or 0) >= threshold
+                            and (row.totals.clicks or 0) >= client.targets.minimum_clicks
+                        ):
+                            signals.append(
+                                Signal(
+                                    type="campaign_without_conversions",
+                                    level="red",
+                                    message=f"Кампания «{row.name}» расходует без основных конверсий.",
+                                    actual={
+                                        "campaign_id": row.id,
+                                        "spend": row.totals.spend,
+                                        "conversions": 0,
+                                    },
+                                    period=period,
+                                    evidence="Порог расхода и кликов превышен; аналитика доступна.",
+                                    confidence="high",
+                                    sufficient_data=True,
+                                    next_check="Проверить целевой трафик этой кампании и посадочную страницу.",
+                                )
+                            )
+                for dim, label in [
+                    ("device", "устройства"),
+                    *(
+                        [("geo", "география"), ("search", "запросы"), ("placement", "площадки")]
+                        if signals or mode == CheckMode.DEEP
+                        else []
+                    ),
+                ]:
+                    cur, prev = await asyncio.gather(
+                        self.provider.breakdown(client, period.current, dim),
+                        self.provider.breakdown(client, period.previous, dim),
+                    )
+                    checks[label] = (
+                        cur.status.value if prev.status == DataStatus.OK else prev.status.value
+                    )
+                    limitations.extend(cur.limitations + prev.limitations)
+                    if dim == "device" and mature and health["healthy"]:
+                        for row in drivers(cur, prev):
+                            x, y = (
+                                Metrics.model_validate(row["current"]),
+                                Metrics.model_validate(row["previous"]),
+                            )
+                            drop = change(x.cr, y.cr)["percent"]
+                            if (
+                                drop is not None
+                                and drop <= -client.targets.cr_drop_percent
+                                and min(x.clicks or 0, y.clicks or 0)
+                                >= client.targets.minimum_clicks
+                                and (y.conversions or 0) >= client.targets.minimum_conversions
+                            ):
+                                signals.append(
+                                    Signal(
+                                        type="device_cr_drop",
+                                        level="yellow",
+                                        message=f"Снизился CR: {row['name']}.",
+                                        actual={
+                                            "current_cr": x.cr,
+                                            "previous_cr": y.cr,
+                                            "percent": drop,
+                                        },
+                                        period=period,
+                                        evidence="Достаточный трафик в обоих периодах; CR рассчитан по кликам.",
+                                        confidence="medium",
+                                        sufficient_data=True,
+                                        next_check="Проверить формы и посадочные страницы на этом устройстве.",
+                                    )
+                                )
+            else:
+                limitations.append("Краткая сводка: детальные разрезы не проверялись.")
+            signals.sort(key=lambda s: 0 if s.level == "red" else 1)
+            reliable = (
+                health["healthy"]
+                and previous.direct.status == DataStatus.OK
+                and previous.metrica.status == DataStatus.OK
+                and (a.clicks or 0) >= client.targets.minimum_clicks
+                and current.direct.campaigns_status == DataStatus.OK
+                and mature
+                and all(v in ("ok", "not_checked") for v in checks.values())
+            )
+            level = signals[0].level if signals else "green" if reliable else "unknown"
+            return ClientReport(
+                client_id=client.id,
+                client_name=client.name,
+                period=period,
+                mode=mode,
+                status="signals_detected"
+                if signals
+                else "no_problems_detected"
+                if reliable
+                else "insufficient",
+                level=level,
+                current=a,
+                previous=b,
+                changes=compare(a, b),
+                signals=signals,
+                drivers=campaign_drivers,
+                checks=checks,
+                source_status={
+                    "Директ": current.direct.status.value,
+                    "Метрика": current.metrica.status.value,
+                    current.revenue.source: current.revenue.status.value,
+                },
+                limitations=list(dict.fromkeys(limitations)),
+                main_goal_ids=client.metrica.main_goal_ids,
+                mock=self.provider.mock,
+                generated_at=datetime.now(UTC),
+            )
+
+    async def run_check(self, client_ids, period, mode, trigger, *, chat_id):
+        period.completed()
+        # Fail closed before any integration is called, even in scheduled/internal paths.
+        clients = [self.registry.require(chat_id, cid) for cid in dict.fromkeys(client_ids)]
+        run_id = await self.repository.begin_run(
+            chat_id, [c.id for c in clients], period, mode, trigger
+        )
+        start = monotonic()
+        reports, errors = [], []
+        try:
+            results = await asyncio.gather(
+                *(self.analyze(c, period, mode) for c in clients), return_exceptions=True
+            )
+            for client, result in zip(clients, results, strict=True):
+                if isinstance(result, BaseException):
+                    errors.append(
+                        f"{client.id}: проверка завершилась ошибкой; остальные клиенты обработаны."
+                    )
+                else:
+                    reports.append(result)
+                    if any(v == "unavailable" for v in result.source_status.values()):
+                        errors.append(f"{client.id}: один или несколько источников недоступны.")
+            text = (
+                detailed(reports[0])
+                if len(clients) == 1 and reports and mode != CheckMode.SUMMARY
+                else compact(reports, period, errors, mode == CheckMode.SUMMARY)
+            )
+            await self.repository.finish_run(run_id, reports, errors, text, monotonic() - start)
+            return reports, text
+        except BaseException:
+            await self.repository.finish_run(
+                run_id, reports, ["Проверка прервана."], "", monotonic() - start, status="failed"
+            )
+            raise

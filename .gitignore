@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AdBeam local configuration, reports and databases
+config/clients.yaml
+data/
+*.db
+*.db-wal
+*.db-shm
+.env.*
+!.env.example

@@ -1,0 +1,23 @@
+services:
+  bot:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    volumes:
+      - adbeam_data:/app/data
+      - ./config/clients.yaml:/app/config/clients.yaml:ro
+    stop_grace_period: 40s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+volumes:
+  adbeam_data:

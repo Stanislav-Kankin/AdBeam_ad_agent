@@ -1,0 +1,109 @@
+import asyncio
+import logging
+from datetime import datetime
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+
+from app.analytics.periods import MOSCOW, make_period, today_moscow
+from app.domain.reports import CheckMode, TriggerSource
+from app.reporting.formatter import compact, split_message
+
+logger = logging.getLogger(__name__)
+
+
+class DailySchedule:
+    def __init__(self, settings, checks, send):
+        self.settings, self.checks, self.send = settings, checks, send
+        self.scheduler = AsyncIOScheduler(timezone=MOSCOW)
+        self.lock = asyncio.Lock()
+
+    def start(self):
+        if not self.settings.schedule_enabled:
+            return
+        chat = self.settings.telegram_report_chat_id
+        if chat not in self.checks.registry.allowed_chats:
+            raise ValueError("Чат ежедневной доставки должен входить в allowlist.")
+        interval = self.settings.mock_schedule_interval_seconds
+        trigger = (
+            IntervalTrigger(seconds=interval, timezone=MOSCOW)
+            if interval
+            else CronTrigger(
+                hour=self.settings.schedule_hour,
+                minute=self.settings.schedule_minute,
+                timezone=MOSCOW,
+            )
+        )
+        self.scheduler.add_job(
+            self.run,
+            trigger=trigger,
+            id="daily",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
+        )
+        self.scheduler.start()
+
+    async def run(self):
+        async with self.lock:
+            chat = self.settings.telegram_report_chat_id
+            if chat not in self.checks.registry.allowed_chats:
+                logger.error("Scheduled delivery denied: chat not allowed")
+                return
+            date_key = str(today_moscow())
+            if self.settings.mock_schedule_interval_seconds:
+                date_key = datetime.now(MOSCOW).isoformat()
+            key = f"{self.settings.app_mode}:{chat}:{date_key}"
+            repo = self.checks.repository
+            try:
+                delivery = await repo.delivery(key)
+                if delivery and delivery.status == "sent":
+                    return
+                if not delivery:
+                    ids = [c.id for c in self.checks.registry.visible(chat)]
+                    blocks = ["Ежедневная проверка: вчера и последние 7 завершённых дней."]
+                    for period_name in ("yesterday", "7d"):
+                        period = make_period(period_name)
+                        reports, _ = await self.checks.run_check(
+                            ids, period, CheckMode.STANDARD, TriggerSource.SCHEDULE, chat_id=chat
+                        )
+                        failed = [
+                            f"{cid}: проверка не завершена."
+                            for cid in ids
+                            if cid not in {r.client_id for r in reports}
+                        ]
+                        blocks.append(compact(reports, period, failed))
+                    if self.checks.registry.errors:
+                        blocks.append(
+                            f"В конфиге пропущено ошибочных записей: {len(self.checks.registry.errors)}. Проверьте журнал запуска."
+                        )
+                    await repo.save_delivery(key, parts=split_message("\n\n".join(blocks)))
+                    delivery = await repo.delivery(key)
+                for index in range(delivery.next_part, len(delivery.parts)):
+                    await self.send(chat, delivery.parts[index])
+                    await repo.save_delivery(key, next_part=index + 1)
+                await repo.save_delivery(key, next_part=len(delivery.parts), status="sent")
+            except Exception as exc:
+                logger.error(
+                    "Daily check/delivery failed (%s); pending delivery retained",
+                    type(exc).__name__,
+                )
+
+    async def describe(self):
+        settings = self.settings
+        last = await self.checks.repository.last_schedule(settings.telegram_report_chat_id)
+        job = self.scheduler.get_job("daily") if self.scheduler.running else None
+        next_run = job.next_run_time.isoformat() if job and job.next_run_time else "не запланирован"
+        return (
+            f"Ежедневная проверка: {'включена' if settings.schedule_enabled else 'выключена'}\n"
+            f"Время: {settings.schedule_hour:02}:{settings.schedule_minute:02} Europe/Moscow\n"
+            f"Чат доставки: {settings.telegram_report_chat_id}\n"
+            f"Последний запуск: {last.started_at.isoformat() + ' (' + last.status + ')' if last else 'не было'}\n"
+            f"Следующий запуск: {next_run}\n"
+            f"Тестовый интервал: {settings.mock_schedule_interval_seconds or 'выключен'}"
+        )
+
+    def close(self):
+        if self.scheduler.running:
+            self.scheduler.shutdown(wait=False)

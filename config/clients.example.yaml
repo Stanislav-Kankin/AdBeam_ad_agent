@@ -1,0 +1,62 @@
+# Synthetic examples only. Replace logins, counters, goals, budgets and chat IDs.
+clients:
+  - id: west_export
+    name: West Экспорт
+    aliases: [Николай, West]
+    active: true
+    mock_scenario: red
+    direct:
+      client_login: example-west
+      main_goal_ids: ['123456']
+      attribution_model: LC
+    metrica:
+      counter_id: 12345678
+      main_goal_ids: ['123456']
+    targets:
+      target_cpa: 1500
+      monthly_budget: 210000
+      minimum_spend_for_analysis: 3000
+      conversion_delay_days: 0
+    revenue:
+      source: metrica_ecommerce
+      attribution_confirmed: true
+    telegram:
+      allowed_chat_ids: [123456789]
+  - id: grand_line
+    name: Grand Line
+    aliases: [Гранд Лайн]
+    mock_scenario: yellow
+    direct:
+      client_login: example-grand
+      main_goal_ids: ['234567']
+      attribution_model: LC
+    metrica:
+      counter_id: 23456789
+      main_goal_ids: ['234567']
+    targets:
+      target_cpa: 2500
+      minimum_spend_for_analysis: 3000
+      conversion_delay_days: 0
+    telegram:
+      allowed_chat_ids: [123456789]
+  - id: fresh_parfum
+    name: Fresh Parfum
+    aliases: [Фреш]
+    mock_scenario: green
+    direct:
+      client_login: example-fresh
+      main_goal_ids: ['345678']
+      attribution_model: LC
+    metrica:
+      counter_id: 34567890
+      main_goal_ids: ['345678']
+    targets:
+      target_cpa: 2000
+      target_drr: 20
+      minimum_spend_for_analysis: 3000
+      conversion_delay_days: 0
+    revenue:
+      source: metrica_ecommerce
+      attribution_confirmed: true
+    telegram:
+      allowed_chat_ids: [123456789]
