@@ -6,7 +6,12 @@ from pathlib import Path
 from time import time
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.types import BotCommand
 from alembic import command
 from alembic.config import Config
@@ -55,6 +60,26 @@ async def register_commands(bot, commands):
             await asyncio.sleep(5)
 
 
+async def wait_for_telegram(bot):
+    """Warm aiogram's getMe cache, retrying transient failures before polling."""
+    attempt = 0
+    while True:
+        attempt += 1
+        delay = min(2 ** min(attempt, 5), 30)
+        try:
+            logger.info("Connecting to Telegram (getMe), attempt=%s", attempt)
+            async with asyncio.timeout(15):
+                user = await bot.me()
+            logger.info("Telegram connected: @%s", user.username)
+            return
+        except TelegramRetryAfter as exc:
+            delay = max(delay, exc.retry_after)
+        except (TimeoutError, TelegramNetworkError, TelegramServerError) as exc:
+            logger.warning("Telegram getMe temporarily unavailable (%s)", type(exc).__name__)
+        logger.info("Retrying Telegram connection in %s seconds", delay)
+        await asyncio.sleep(delay)
+
+
 async def run_bot(runtime):
     settings = runtime.settings
     token = settings.telegram_bot_token.get_secret_value()
@@ -78,7 +103,6 @@ async def run_bot(runtime):
             await send_part(bot, chat, text)
 
         runtime.schedule = DailySchedule(settings, runtime.checks, send)
-        runtime.schedule.start()
         commands = [
             ("start", "Начать"),
             ("menu", "Главное меню"),
@@ -95,6 +119,8 @@ async def run_bot(runtime):
         pulse = asyncio.create_task(heartbeat())
         menu_task = asyncio.create_task(register_commands(bot, commands))
         try:
+            await wait_for_telegram(bot)
+            runtime.schedule.start()
             logger.info("AdBeam started in %s mode", settings.app_mode)
             await dp.start_polling(
                 bot, close_bot_session=False, allowed_updates=dp.resolve_used_update_types()
