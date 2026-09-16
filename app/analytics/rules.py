@@ -7,9 +7,13 @@ from app.domain.reports import DataStatus, Metrics, Signal, Snapshot
 
 def tracking_health(client, current: Snapshot, previous: Snapshot, period) -> dict:
     reasons = []
-    if current.direct.status != DataStatus.OK:
+    if current.direct.status == DataStatus.EMPTY:
+        reasons.append("Директ не вернул строк статистики за выбранный период.")
+    elif current.direct.status != DataStatus.OK:
         reasons.append("Данные Директа недоступны, отсутствуют или неполные.")
-    if current.metrica.status != DataStatus.OK:
+    if current.metrica.status == DataStatus.INSUFFICIENT:
+        reasons.extend(current.metrica.limitations or ["Данные Метрики получены с ограничениями."])
+    elif current.metrica.status != DataStatus.OK:
         reasons.append("Данные Метрики недоступны, отсутствуют или неполные.")
     if not client.metrica.main_goal_ids or current.metrica.missing_goal_ids:
         reasons.append("Основные цели не настроены или отсутствуют в счётчике.")
