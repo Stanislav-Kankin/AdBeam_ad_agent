@@ -20,7 +20,7 @@ class DirectConfig(StrictModel):
 
 
 class MetricaConfig(StrictModel):
-    counter_id: int = Field(gt=0)
+    counter_id: int | None = Field(default=None, gt=0)
     main_goal_ids: list[GoalId] = Field(default_factory=list, max_length=10)
     token_env: str = "METRICA_OAUTH_TOKEN"
 

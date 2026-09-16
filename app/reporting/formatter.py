@@ -49,6 +49,16 @@ def detailed(report: ClientReport) -> str:
         lines.append(
             f"{title}: {fmt(getattr(report.current, key))} ← {fmt(getattr(report.previous, key))}{suffix}"
         )
+    if report.goal_metrics and not report.mock:
+        lines += [
+            "",
+            "Цели Метрики: текущий ← предыдущий период (достижения, не уникальные заявки)",
+        ]
+        for goal in report.goal_metrics:
+            lines.append(
+                f"• [{goal.get('counter_id', '')}/{goal['id']}] {goal['name']}: "
+                f"{fmt(goal['reaches'])} ← {fmt(goal.get('previous_reaches'))}"
+            )
     lines += ["", "Что изменилось — три главных вывода:"]
     lines += [f"• {s.message}" for s in report.signals[:3]] or [
         "• Существенных сигналов в выполненных проверках не обнаружено."

@@ -12,7 +12,9 @@ from app.domain.clients import Client
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_file_encoding="utf-8")
-    app_mode: Literal["mock", "production"] = "mock"
+    app_mode: Literal["mock", "production"] = "production"
+    yandex_discover_clients: bool = True
+    yandex_client_chat_ids: list[int] = Field(default_factory=list)
     database_url: str = ""
     clients_config: Path = Path("config/clients.yaml")
     telegram_bot_token: SecretStr = SecretStr("")
@@ -79,6 +81,8 @@ class ClientRegistry:
 
 
 def load_clients(settings: Settings) -> ClientRegistry:
+    if settings.app_mode == "production" and settings.yandex_discover_clients:
+        return ClientRegistry([], settings.telegram_allowed_chat_ids)
     path = settings.clients_config
     if not path.exists() and settings.app_mode == "mock":
         path = Path("config/clients.example.yaml")

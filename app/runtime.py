@@ -8,6 +8,7 @@ from app.bot.jobs import BackgroundJobs
 from app.config import load_clients
 from app.integrations.deepseek import DeepSeekProvider
 from app.integrations.direct import DirectAdapter
+from app.integrations.discovery import AccountDiscovery
 from app.integrations.http import ReadTransport
 from app.integrations.metrica import MetricaAdapter
 from app.integrations.mock import MockProvider
@@ -28,6 +29,7 @@ class Runtime:
     engine: object
     http: httpx.AsyncClient
     schedule: object = None
+    discovery: object = None
 
     async def close(self):
         if self.schedule:
@@ -58,7 +60,7 @@ def build_runtime(settings):
         if settings.deepseek_api_key.get_secret_value()
         else (OfflineDemoProvider() if settings.app_mode == "mock" else None)
     )
-    return Runtime(
+    runtime = Runtime(
         settings,
         registry,
         checks,
@@ -67,3 +69,6 @@ def build_runtime(settings):
         engine,
         http,
     )
+    if settings.app_mode == "production" and settings.yandex_discover_clients:
+        runtime.discovery = AccountDiscovery(transport, registry, settings)
+    return runtime

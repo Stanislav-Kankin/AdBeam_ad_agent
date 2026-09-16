@@ -273,6 +273,21 @@ class CheckService:
                 },
                 limitations=list(dict.fromkeys(limitations)),
                 main_goal_ids=client.metrica.main_goal_ids,
+                goal_metrics=[
+                    {
+                        **g,
+                        "previous_reaches": next(
+                            (
+                                p.get("reaches")
+                                for p in previous.metrica.goals
+                                if (p.get("counter_id"), p["id"]) == (g.get("counter_id"), g["id"])
+                            ),
+                            None,
+                        ),
+                    }
+                    for g in current.metrica.goals
+                    if g.get("reaches") is not None
+                ],
                 mock=self.provider.mock,
                 generated_at=datetime.now(UTC),
             )

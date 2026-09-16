@@ -46,6 +46,12 @@ async def run_bot(runtime):
         raise ValueError("Настройте TELEGRAM_ALLOWED_CHAT_IDS и права клиентов.")
     for error in runtime.registry.errors:
         logger.warning(error)
+    if runtime.discovery:
+        try:
+            count = await runtime.discovery.refresh()
+            logger.info("Loaded %s clients from Yandex Direct", count)
+        except Exception:
+            logger.warning("Yandex client discovery failed; retry using the menu")
     async with Bot(token=token) as bot:
 
         async def send(chat, text):

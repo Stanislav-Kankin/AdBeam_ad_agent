@@ -6,9 +6,11 @@ services:
     restart: unless-stopped
     init: true
     env_file: .env
+    environment:
+      APP_MODE: production
+      YANDEX_DISCOVER_CLIENTS: 'true'
     volumes:
       - adbeam_data:/app/data
-      - ./config/clients.yaml:/app/config/clients.yaml:ro
     stop_grace_period: 40s
     security_opt:
       - no-new-privileges:true

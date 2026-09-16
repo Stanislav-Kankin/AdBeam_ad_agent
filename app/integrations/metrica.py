@@ -1,5 +1,6 @@
 from app.config import secret_from_env
 from app.domain.reports import DataStatus, MetricaData, RevenueData
+from app.integrations.discovery import campaign_counters
 from app.integrations.http import IntegrationError, ReadTransport, number
 from app.security import redact
 
@@ -23,6 +24,24 @@ class MetricaAdapter:
         return {"Authorization": f"OAuth {token}"}
 
     async def report(self, client, period, campaign_ids, metrics):
+        if len(campaign_ids) > 100 or len(metrics) > 20:
+            totals = [number(0) for _ in metrics]
+            sampled = False
+            for offset in range(0, len(campaign_ids), 100):
+                for start in range(0, len(metrics), 20):
+                    data = await self.report(
+                        client,
+                        period,
+                        campaign_ids[offset : offset + 100],
+                        metrics[start : start + 20],
+                    )
+                    sampled |= bool(data.get("sampled"))
+                    for i, value in enumerate(data["totals"]):
+                        totals[start + i] += number(value)
+            return {"totals": totals, "sampled": sampled}
+        return await self._report(client, period, campaign_ids, metrics)
+
+    async def _report(self, client, period, campaign_ids, metrics):
         if not campaign_ids or len(campaign_ids) > 100:
             raise IntegrationError("metrica", "campaign_scope_missing_or_too_large")
         if any(not str(v).isdigit() for v in campaign_ids):
@@ -54,6 +73,45 @@ class MetricaAdapter:
         return data
 
     async def overview(self, client, period, campaign_ids):
+        if client.metrica.counter_id is not None:
+            return await self._overview(client, period, campaign_ids)
+        counters = await campaign_counters(self.transport, client)
+        if not counters:
+            return MetricaData(
+                status=DataStatus.NOT_CHECKED,
+                period=period,
+                limitations=["В настройках кампаний не найдены счётчики Метрики."],
+            )
+        reports, limitations = [], []
+        for counter_id in counters:
+            scoped = client.model_copy(
+                update={"metrica": client.metrica.model_copy(update={"counter_id": counter_id})}
+            )
+            try:
+                report = await self._overview(scoped, period, campaign_ids, all_goals=True)
+                reports.append(report)
+            except IntegrationError as exc:
+                limitations.append(f"Счётчик {counter_id}: {exc}")
+        if not reports:
+            return MetricaData(
+                status=DataStatus.UNAVAILABLE, period=period, limitations=limitations
+            )
+        if len(reports) > 1:
+            limitations.append(
+                "Несколько счётчиков: визиты и цели между счётчиками не суммируются из-за возможных дублей."
+            )
+        return MetricaData(
+            status=DataStatus.INSUFFICIENT
+            if limitations or any(r.status != DataStatus.OK for r in reports)
+            else DataStatus.OK,
+            period=period,
+            visits=reports[0].visits if len(reports) == 1 else None,
+            goals=[g for r in reports for g in r.goals],
+            sampled=any(r.sampled for r in reports),
+            limitations=limitations,
+        )
+
+    async def _overview(self, client, period, campaign_ids, all_goals=False):
         path = f"/management/v1/counter/{client.metrica.counter_id}"
         info = await self.transport.json(
             "metrica", "GET", BASE_URL + path, headers=self.headers(client)
@@ -70,11 +128,12 @@ class MetricaAdapter:
         available = {str(g["id"]): g for g in data["goals"]}
         missing = [g for g in client.metrica.main_goal_ids if g not in available]
         present = [g for g in client.metrica.main_goal_ids if g in available]
+        queried = list(available) if all_goals else present
         report = await self.report(
             client,
             period,
             campaign_ids,
-            ["ym:s:visits", *[f"ym:s:goal{g}reaches" for g in present]],
+            ["ym:s:visits", *[f"ym:s:goal{g}reaches" for g in queried]],
         )
         values = [number(v) for v in report["totals"]]
         goals = [
@@ -82,7 +141,9 @@ class MetricaAdapter:
                 "id": gid,
                 "name": redact(str(g.get("name", gid)))[:150],
                 "primary": gid in present,
-                "reaches": str(values[present.index(gid) + 1]) if gid in present else None,
+                "reaches": str(values[queried.index(gid) + 1]) if gid in queried else None,
+                "counter_id": client.metrica.counter_id,
+                "type": g.get("type", ""),
             }
             for gid, g in available.items()
         ]

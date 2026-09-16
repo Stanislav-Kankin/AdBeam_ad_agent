@@ -116,5 +116,6 @@ class ClientReport(BaseModel):
     source_status: dict[str, str] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)
     main_goal_ids: list[str] = Field(default_factory=list)
+    goal_metrics: list[dict] = Field(default_factory=list)
     mock: bool = False
     generated_at: datetime

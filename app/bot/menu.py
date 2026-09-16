@@ -47,6 +47,8 @@ def install_menu(router, runtime, launch):
             row("📊 Аналитика всех клиентов", "report")
             if user in runtime.settings.telegram_admin_user_ids:
                 row("🕙 Расписание", "schedule")
+                if runtime.discovery:
+                    row("🔄 Обновить клиентов Яндекса", "refresh")
             row("❓ Помощь", "help")
         elif screen == "clients":
             pages = max(1, (len(clients) + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -132,14 +134,33 @@ def install_menu(router, runtime, launch):
             client_id = kwargs.get("client_id")
             if client_id:
                 runtime.registry.require(chat, client_id)
-            if action == "schedule" and user not in runtime.settings.telegram_admin_user_ids:
+            if (
+                action in ("schedule", "refresh")
+                and user not in runtime.settings.telegram_admin_user_ids
+            ):
                 raise PermissionError
         except (PermissionError, KeyError):
             await callback.answer("Доступ больше не разрешён. Откройте /menu.", show_alert=True)
             return
         clear(chat, user)
         await callback.answer()
-        if action == "run":
+        if action == "refresh":
+            await show(callback.message, user, edit=True)
+
+            async def work():
+                await callback.message.answer("Загружаю клиентов из аккаунта Яндекса.")
+                count = await runtime.discovery.refresh()
+                await callback.message.answer(f"Список обновлён. Клиентов: {count}.")
+                await show(callback.message, user, screen="clients")
+
+            async def failed():
+                await callback.message.answer(
+                    "Не удалось получить клиентов Яндекса. Проверьте токен и доступ к API."
+                )
+
+            if not runtime.jobs.start((chat, user), work, failed):
+                await callback.message.answer("Запрос уже выполняется. Попробуйте позже.")
+        elif action == "run":
             ids = [client_id] if client_id else [c.id for c in runtime.registry.visible(chat)]
             await show(callback.message, user, edit=True)
             if ids:
