@@ -46,7 +46,12 @@ class DeepSeekProvider:
 
     async def complete(self, messages, tools):
         result = await self.client.chat.completions.create(
-            model=self.model, messages=messages, tools=tools, max_tokens=2500, temperature=0.2
+            model=self.model,
+            messages=messages,
+            tools=tools,
+            max_tokens=2500,
+            temperature=0.2,
+            extra_body={"thinking": {"type": "disabled"}},
         )
         msg = result.choices[0].message
         return LLMMessage(

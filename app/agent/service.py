@@ -1,11 +1,13 @@
 import asyncio
 import json
+import re
 from importlib.resources import files
 from time import monotonic
 from uuid import uuid4
 
 from app.agent.tools import ToolRegistry, tool_schemas
-from app.analytics.periods import today_moscow
+from app.analytics.periods import make_period, today_moscow
+from app.domain.reports import CheckMode, TriggerSource
 from app.security import redact
 
 
@@ -22,7 +24,11 @@ class AgentService:
         if chat_id not in self.checks.registry.allowed_chats:
             raise PermissionError("Чат не разрешён.")
         if not self.llm:
-            return "DeepSeek не подключён. Используйте /check <клиент>, /check_all или /summary_all. Для свободных вопросов настройте DEEPSEEK_API_KEY в .env."
+            return await self.deterministic_fallback(
+                text,
+                chat_id,
+                "DeepSeek не подключён. Для свободного анализа настройте DEEPSEEK_API_KEY в .env.",
+            )
         request_id, start = str(uuid4()), monotonic()
         key = (chat_id, user_id)
         # Drop old conversations and bound memory by both sessions and message length.
@@ -89,10 +95,68 @@ class AgentService:
                 error="LLM unavailable",
                 duration_seconds=monotonic() - start,
             )
-            return self.fallback(
-                evidence,
-                "DeepSeek недоступен. Обычные отчёты /check и /summary продолжают работать.",
+            message = "DeepSeek недоступен. Обычные отчёты /check и /summary продолжают работать."
+            if any(result.get("reports") for result in evidence):
+                return self.fallback(evidence, message)
+            return await self.deterministic_fallback(text, chat_id, message)
+
+    async def deterministic_fallback(self, text, chat_id, message):
+        question = text.casefold()
+        clients = self.checks.registry.visible(chat_id)
+        selected = [
+            c
+            for c in clients
+            if any(
+                re.search(r"(?<!\w)" + re.escape(v.casefold()) + r"(?!\w)", question)
+                for v in [c.id, c.name, *c.aliases]
             )
+        ]
+        all_clients = any(v in question for v in ("всем клиентам", "всех клиентов", "все клиенты"))
+        if all_clients:
+            selected = clients
+        if not selected or len(selected) > 1 and not all_clients:
+            return (
+                message
+                + "\nУкажите клиента и период командой /check <клиент> [7d]. /clients — список."
+            )
+        # A fallback must not silently reinterpret explicit/custom/incomplete dates.
+        if re.search(r"\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}", question) or any(
+            v in question
+            for v in (
+                "сегодня",
+                "текущ",
+                "январ",
+                "феврал",
+                "март",
+                "апрел",
+                "мая",
+                "июн",
+                "июл",
+                "август",
+                "сентябр",
+                "октябр",
+                "ноябр",
+                "декабр",
+                "позавчера",
+            )
+        ):
+            return (
+                message
+                + "\nДля этого периода используйте /check с 1d–90d или повторите вопрос позже."
+            )
+        match = re.search(r"\b(\d{1,3})\s*(?:d\b|дн|дней)", question)
+        period_name = f"{match[1]}d" if match else "yesterday" if "вчера" in question else "7d"
+        try:
+            _, report = await self.checks.run_check(
+                [c.id for c in selected],
+                make_period(period_name),
+                CheckMode.STANDARD,
+                TriggerSource.AGENT,
+                chat_id=chat_id,
+            )
+            return message + "\nДетерминированная стандартная проверка:\n\n" + report
+        except Exception:
+            return message + "\nНе удалось завершить проверку. Используйте /check <клиент> позже."
 
     @staticmethod
     def fallback(evidence, message):

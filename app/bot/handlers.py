@@ -1,7 +1,9 @@
+import asyncio
 import secrets
 from time import monotonic
 
 from aiogram import Dispatcher, F, Router
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.analytics.periods import make_period
@@ -13,7 +15,17 @@ from app.reporting.formatter import split_message
 
 async def send_text(bot, chat_id, text):
     for part in split_message(text):
-        await bot.send_message(chat_id, part, parse_mode=None)
+        await send_part(bot, chat_id, part)
+
+
+async def send_part(bot, chat_id, text):
+    for attempt in range(3):
+        try:
+            return await bot.send_message(chat_id, text, parse_mode=None)
+        except TelegramRetryAfter as exc:
+            if attempt == 2 or exc.retry_after > 60:
+                raise
+            await asyncio.sleep(exc.retry_after)
 
 
 def build_dispatcher(runtime):

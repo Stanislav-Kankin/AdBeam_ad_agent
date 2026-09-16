@@ -1,17 +1,19 @@
 from datetime import date
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from app.analytics.periods import AnalysisPeriod, DateRange, make_period
 from app.domain.clients import StrictModel
 
 
 class ListArgs(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
     offset: int = Field(default=0, ge=0, le=10000)
     top_n: int = Field(default=30, ge=1, le=50)
 
 
 class ClientArgs(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
     client_id: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
     period: str = "7d"
     top_n: int = Field(default=10, ge=1, le=50)

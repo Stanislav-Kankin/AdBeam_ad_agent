@@ -16,7 +16,8 @@ def redact(text: str) -> str:
     text = re.sub(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", "[email скрыт]", text)
     text = re.sub(
         r"(?<![\w.])(?:\+7|8)[ (.-]*\d{3}[ ).-]*\d{3}[ -]*\d{2}[ -]*\d{2}(?![\w.])",
-        "[номер скрыт]", text,
+        "[номер скрыт]",
+        text,
     )
     text = re.sub(r"(?<![\w.])\+\d{10,15}(?![\w.])", "[номер скрыт]", text)
     return text

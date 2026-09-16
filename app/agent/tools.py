@@ -1,3 +1,4 @@
+import json
 from time import monotonic
 
 from pydantic import ValidationError
@@ -195,4 +196,27 @@ class ToolRegistry:
         return {"status": status, "error": error}
 
     async def call(self, *args, **kwargs):
-        return safe_json(await self.execute(*args, **kwargs))
+        result = safe_json(await self.execute(*args, **kwargs))
+        # Bound valid structured JSON, never cut serialized JSON halfway through a field.
+        for _ in range(12):
+            if len(json.dumps(result, ensure_ascii=False)) <= 40000:
+                return result
+
+            def shrink(value):
+                if isinstance(value, dict):
+                    for key, child in value.items():
+                        if (
+                            isinstance(child, list)
+                            and len(child) > 1
+                            and key not in ("main_goal_ids", "missing_goal_ids")
+                        ):
+                            value[key] = child[: max(1, len(child) // 2)]
+                        else:
+                            shrink(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        shrink(child)
+
+            shrink(result)
+            result["output_limited"] = True
+        return {"status": "output_limit", "error": "Ответ слишком велик. Сузьте период или top_n."}

@@ -13,6 +13,8 @@ def tracking_health(client, current: Snapshot, previous: Snapshot, period) -> di
         reasons.append("Данные Метрики недоступны, отсутствуют или неполные.")
     if not client.metrica.main_goal_ids or current.metrica.missing_goal_ids:
         reasons.append("Основные цели не настроены или отсутствуют в счётчике.")
+    if client.direct.main_goal_ids and current.direct.totals.conversions is None:
+        reasons.append("Директ не вернул достоверную статистику основных конверсий.")
     if current.metrica.sampled:
         reasons.append("Метрика вернула выборочные данные.")
     if current.direct.period != period.current or current.metrica.period != period.current:

@@ -1,6 +1,7 @@
 import asyncio
+import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -43,7 +44,28 @@ class DailySchedule:
             max_instances=1,
             misfire_grace_time=3600,
         )
+        if not interval:
+            self.scheduler.add_job(
+                self.catch_up,
+                "interval",
+                minutes=5,
+                id="retry_delivery",
+                next_run_time=datetime.now(MOSCOW) + timedelta(seconds=5),
+                coalesce=True,
+                max_instances=1,
+            )
         self.scheduler.start()
+
+    async def catch_up(self):
+        now = datetime.now(MOSCOW)
+        due = now.replace(
+            hour=self.settings.schedule_hour,
+            minute=self.settings.schedule_minute,
+            second=0,
+            microsecond=0,
+        )
+        if now >= due:
+            await self.run()
 
     async def run(self):
         async with self.lock:
@@ -54,14 +76,15 @@ class DailySchedule:
             date_key = str(today_moscow())
             if self.settings.mock_schedule_interval_seconds:
                 date_key = datetime.now(MOSCOW).isoformat()
-            key = f"{self.settings.app_mode}:{chat}:{date_key}"
+            ids = [c.id for c in self.checks.registry.visible(chat)]
+            scope = hashlib.sha256(",".join(sorted(ids)).encode()).hexdigest()[:12]
+            key = f"{self.settings.app_mode}:{chat}:{date_key}:{scope}"
             repo = self.checks.repository
             try:
                 delivery = await repo.delivery(key)
                 if delivery and delivery.status == "sent":
                     return
                 if not delivery:
-                    ids = [c.id for c in self.checks.registry.visible(chat)]
                     blocks = ["Ежедневная проверка: вчера и последние 7 завершённых дней."]
                     for period_name in ("yesterday", "7d"):
                         period = make_period(period_name)

@@ -11,7 +11,7 @@ from alembic import command
 from alembic.config import Config
 
 from app.analytics.periods import make_period
-from app.bot.handlers import build_dispatcher
+from app.bot.handlers import build_dispatcher, send_part
 from app.config import Settings, load_settings
 from app.domain.reports import CheckMode, TriggerSource
 from app.runtime import build_runtime
@@ -49,7 +49,7 @@ async def run_bot(runtime):
     async with Bot(token=token) as bot:
 
         async def send(chat, text):
-            await bot.send_message(chat, text, parse_mode=None)
+            await send_part(bot, chat, text)
 
         runtime.schedule = DailySchedule(settings, runtime.checks, send)
         runtime.schedule.start()
@@ -138,9 +138,18 @@ def main():
     demo.add_argument("--period", default="7d")
     demo.add_argument("--ask")
     demo.add_argument("--daily", action="store_true")
+    demo.add_argument(
+        "--live-llm",
+        action="store_true",
+        help="Один вопрос реальному DeepSeek на mock-данных; требуется --ask и ключ в .env",
+    )
     args = parser.parse_args()
     settings = load_settings()
     if args.command == "demo":
+        live_key = settings.deepseek_api_key if args.live_llm else ""
+        live_model, live_url = settings.deepseek_model, settings.deepseek_base_url
+        if args.live_llm and (not args.ask or not settings.deepseek_api_key.get_secret_value()):
+            parser.error("--live-llm требует --ask и DEEPSEEK_API_KEY в локальном .env.")
         # Explicitly isolate demo from all production configuration and secrets.
         settings = Settings(
             _env_file=None,
@@ -150,7 +159,9 @@ def main():
             telegram_allowed_chat_ids=[123456789],
             telegram_report_chat_id=123456789,
             telegram_bot_token="",
-            deepseek_api_key="",
+            deepseek_api_key=live_key,
+            deepseek_model=live_model,
+            deepseek_base_url=live_url,
             schedule_enabled=False,
             mock_schedule_interval_seconds=1,
         )

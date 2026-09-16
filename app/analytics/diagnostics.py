@@ -163,6 +163,43 @@ class CheckService:
                         cur.status.value if prev.status == DataStatus.OK else prev.status.value
                     )
                     limitations.extend(cur.limitations + prev.limitations)
+                    if (
+                        dim != "device"
+                        and mature
+                        and health["healthy"]
+                        and cur.status == DataStatus.OK
+                    ):
+                        empty = [
+                            r
+                            for r in cur.rows
+                            if r.totals.conversions == 0
+                            and (r.totals.spend or 0) >= threshold
+                            and (r.totals.clicks or 0) >= client.targets.minimum_clicks
+                        ]
+                        if empty:
+                            signals.append(
+                                Signal(
+                                    type=f"{dim}_without_conversions",
+                                    level="yellow",
+                                    message=f"Разрез «{label}»: есть расход без основных конверсий.",
+                                    actual={
+                                        "segments": [
+                                            {
+                                                "name": r.name,
+                                                "spend": r.totals.spend,
+                                                "conversions": 0,
+                                            }
+                                            for r in empty[:5]
+                                        ],
+                                        "count": len(empty),
+                                    },
+                                    period=period,
+                                    evidence="Порог кликов и расхода превышен в указанных сегментах.",
+                                    confidence="medium",
+                                    sufficient_data=True,
+                                    next_check=f"Проверить разрез «{label}» и соответствие трафика основной цели.",
+                                )
+                            )
                     if dim == "device" and mature and health["healthy"]:
                         for row in drivers(cur, prev):
                             x, y = (
@@ -197,6 +234,11 @@ class CheckService:
             else:
                 limitations.append("Краткая сводка: детальные разрезы не проверялись.")
             signals.sort(key=lambda s: 0 if s.level == "red" else 1)
+            if len(signals) > 50:
+                limitations.append(
+                    f"Показаны первые 50 сигналов из {len(signals)}; сузьте период для деталей."
+                )
+                signals = signals[:50]
             reliable = (
                 health["healthy"]
                 and previous.direct.status == DataStatus.OK
