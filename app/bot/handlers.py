@@ -9,6 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.analytics.periods import make_period
 from app.analytics.progress import progress_state
 from app.bot.commands import HELP, parse_command
+from app.bot.markdown import markdown_parts
 from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities
@@ -16,16 +17,23 @@ from app.domain.reports import CheckMode, TriggerSource
 from app.reporting.formatter import split_message
 
 
-async def send_text(bot, chat_id, text):
+async def send_text(bot, chat_id, text, *, markdown=False):
+    if markdown:
+        for part, entities in markdown_parts(text):
+            await send_part(bot, chat_id, part, entities=entities)
+        return
     for part in split_message(text):
         await send_part(bot, chat_id, part)
 
 
-async def send_part(bot, chat_id, text):
+async def send_part(bot, chat_id, text, entities=None):
     for attempt in range(3):
         try:
             return await bot.send_message(
-                chat_id, text, parse_mode=None, entities=report_entities(text)
+                chat_id,
+                text,
+                parse_mode=None,
+                entities=report_entities(text) if entities is None else entities,
             )
         except TelegramRetryAfter as exc:
             if attempt == 2 or exc.retry_after > 60:
@@ -185,7 +193,7 @@ def build_dispatcher(runtime):
         async def work():
             await message.answer("Разбираю вопрос и проверяю данные.")
             answer = await runtime.agent.ask(message.text, message.chat.id, message.from_user.id)
-            await send_text(message.bot, message.chat.id, answer)
+            await send_text(message.bot, message.chat.id, answer, markdown=True)
 
         async def failed():
             await message.answer("Не удалось обработать вопрос. Попробуйте /check <клиент>.")

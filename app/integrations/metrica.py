@@ -92,6 +92,11 @@ class MetricaAdapter:
                 reports.append(report)
             except IntegrationError as exc:
                 limitations.append(f"Счётчик {counter_id}: {exc}")
+                if exc.code == "quota_cooldown_429":
+                    limitations.append(
+                        "Остальные счётчики не проверены из-за ограничения квоты Метрики."
+                    )
+                    break
         if not reports:
             return MetricaData(
                 status=DataStatus.UNAVAILABLE, period=period, limitations=limitations

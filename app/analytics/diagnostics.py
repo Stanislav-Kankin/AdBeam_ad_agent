@@ -178,7 +178,8 @@ class CheckService:
                     checks[label] = (
                         cur.status.value if prev.status == DataStatus.OK else prev.status.value
                     )
-                    limitations.extend(cur.limitations + prev.limitations)
+                    limitations.extend(f"{label}, текущий период: {v}" for v in cur.limitations)
+                    limitations.extend(f"{label}, предыдущий период: {v}" for v in prev.limitations)
                     if (
                         dim != "device"
                         and mature

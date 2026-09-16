@@ -45,19 +45,30 @@ def detailed(report: ClientReport) -> str:
     ]
     for key, title in METRIC_NAMES.items():
         diff = report.changes[key]["percent"]
-        suffix = f"; изменение {fmt(diff)}%" if diff is not None else "; сравнение не рассчитано"
+        suffix = (
+            f"; изменение {'+' if Decimal(diff) > 0 else ''}{fmt(diff)}%"
+            if diff is not None
+            else "; изменение не рассчитано (нет базы сравнения)"
+        )
+        if key in ("ctr", "cr", "drr"):
+            absolute = report.changes[key]["absolute"]
+            if absolute is not None:
+                suffix = (
+                    f"; изменение {'+' if Decimal(absolute) > 0 else ''}{fmt(absolute)} п.п."
+                    + suffix.replace("; изменение", "; относительно прошлого периода", 1)
+                )
         lines.append(
-            f"{title}: {fmt(getattr(report.current, key))} ← {fmt(getattr(report.previous, key))}{suffix}"
+            f"{title}: сейчас {fmt(getattr(report.current, key))}; раньше {fmt(getattr(report.previous, key))}{suffix}"
         )
     if report.goal_metrics and not report.mock:
         lines += [
             "",
-            "Цели Метрики: текущий ← предыдущий период (достижения, не уникальные заявки)",
+            "Цели Метрики: достижения за указанные периоды, не уникальные заявки",
         ]
         for goal in report.goal_metrics:
             lines.append(
                 f"• [{goal.get('counter_id', '')}/{goal['id']}] {goal['name']}: "
-                f"{fmt(goal['reaches'])} ← {fmt(goal.get('previous_reaches'))}"
+                f"сейчас {fmt(goal['reaches'])}; раньше {fmt(goal.get('previous_reaches'))}"
             )
     lines += ["", "Что изменилось — три главных вывода:"]
     lines += [f"• {s.message}" for s in report.signals[:3]] or [
