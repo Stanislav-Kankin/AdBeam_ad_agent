@@ -151,10 +151,10 @@ async def test_no_data_never_green(runtime, client):
 async def test_partial_client_failure_keeps_other_reports(runtime, monkeypatch):
     original = runtime.checks.provider.snapshot
 
-    async def failing(client, period):
+    async def failing(client, period, *, quick=False):
         if client.id == "west_export":
             raise RuntimeError("not sent to output")
-        return await original(client, period)
+        return await original(client, period, quick=quick)
 
     monkeypatch.setattr(runtime.checks.provider, "snapshot", failing)
     reports, text = await runtime.checks.run_check(
@@ -165,7 +165,7 @@ async def test_partial_client_failure_keeps_other_reports(runtime, monkeypatch):
         chat_id=123456789,
     )
     assert len(reports) == 2
-    assert "west_export" in text and "not sent" not in text
+    assert "West Экспорт" in text and "west_export" not in text and "not sent" not in text
 
 
 async def test_summary_does_not_request_dimensions(runtime, monkeypatch):

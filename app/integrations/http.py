@@ -1,7 +1,12 @@
 import asyncio
+import logging
 from decimal import Decimal, InvalidOperation
+from time import monotonic
+from urllib.parse import urlsplit
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class IntegrationError(Exception):
@@ -27,14 +32,33 @@ class ReadTransport:
         self.client, self.retries, self.sleep = client, retries, sleep
 
     async def request(self, source, method, url, *, pending=False, **kwargs):
+        # Log operation only: never headers, query strings, response bodies, or credentials.
+        operation = urlsplit(url).path
         for attempt in range(self.retries + 1):
+            started = monotonic()
+            logger.info(
+                "API request source=%s operation=%s attempt=%s", source, operation, attempt + 1
+            )
             delay = min(2**attempt, 30)
             try:
                 response = await self.client.request(method, url, **kwargs)
             except httpx.RequestError:
+                logger.warning(
+                    "API network error source=%s operation=%s elapsed=%.1fs",
+                    source,
+                    operation,
+                    monotonic() - started,
+                )
                 if attempt == self.retries:
                     raise IntegrationError(source, "network_error") from None
             else:
+                logger.info(
+                    "API response source=%s operation=%s status=%s elapsed=%.1fs",
+                    source,
+                    operation,
+                    response.status_code,
+                    monotonic() - started,
+                )
                 if response.status_code == 200:
                     return response
                 retryable = response.status_code == 429 or response.status_code >= 500
@@ -61,5 +85,17 @@ class ReadTransport:
         except ValueError:
             raise IntegrationError(source, "invalid_response") from None
         if data.get("error") or data.get("errors") or data.get("status") == "error":
-            raise IntegrationError(source, "api_error")
+            error = data.get("error")
+            if isinstance(error, dict):
+                code = error.get("error_code")
+            else:
+                code = data.get("code")
+            # Only a numeric API error code is safe to log without echoing input values.
+            suffix = f"_{code}" if isinstance(code, int) else ""
+            logger.warning(
+                "API rejected request source=%s code=%s",
+                source,
+                code if isinstance(code, int) else "unknown",
+            )
+            raise IntegrationError(source, "api_error" + suffix)
         return data

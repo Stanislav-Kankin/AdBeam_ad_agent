@@ -26,7 +26,9 @@ async def test_account_pagination_acl_and_removal(settings, monkeypatch):
             200,
             json={
                 "result": {
-                    "Clients": [{"Login": f"client-{offset}", "Currency": "RUB"}],
+                    "Clients": [
+                        {"Login": f"client-{offset}", "ClientInfo": "Company", "Currency": "RUB"}
+                    ],
                     **({"LimitedBy": 1} if offset == 0 else {}),
                 }
             },
@@ -37,6 +39,8 @@ async def test_account_pagination_acl_and_removal(settings, monkeypatch):
         assert await service.refresh() == 2
         assert pages == [0, 1]
         assert len(registry.visible(123456789)) == 2
+        assert registry.visible(123456789)[0].name == "Company · client-0"
+        assert registry.resolve(123456789, "client-0")[0].direct.client_login == "client-0"
         assert not registry.visible(999)
         ids = list(registry.clients)
         await service.refresh()

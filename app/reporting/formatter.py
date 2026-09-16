@@ -131,6 +131,7 @@ def compact(
         ]
         if unavailable:
             lines.append("Ограничения данных: " + ", ".join(unavailable))
+            lines.extend(report.limitations[:2])
         elif report.limitations:
             lines.append(report.limitations[0])
         if not summary and report.drivers:

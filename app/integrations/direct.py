@@ -54,8 +54,8 @@ def parse_tsv(text: str, goals: list[str], attribution: str, fields: list[str]):
 class DirectAdapter:
     def __init__(self, transport: ReadTransport):
         self.transport = transport
-        # Direct caps offline reports per token; serialize report generation in this MVP.
-        self.report_lock = asyncio.Lock()
+        # One scheduled client uses two periods; leave capacity for an interactive report.
+        self.report_lock = asyncio.Semaphore(3)
 
     def headers(self, client):
         token = secret_from_env(client.direct.token_env)

@@ -1,13 +1,25 @@
 import asyncio
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from time import monotonic
 
 from app.analytics.metrics import calculate, change, compare
 from app.analytics.periods import today_moscow
+from app.analytics.progress import stage
 from app.analytics.rules import evaluate, tracking_health
-from app.domain.reports import CheckMode, ClientReport, DataStatus, Metrics, Signal, Totals
+from app.domain.reports import (
+    CheckMode,
+    ClientReport,
+    DataStatus,
+    Metrics,
+    Signal,
+    Totals,
+    TriggerSource,
+)
 from app.reporting.formatter import compact, detailed
+
+logger = logging.getLogger(__name__)
 
 
 def snapshot_metrics(snapshot, *, healthy=True):
@@ -50,16 +62,20 @@ class CheckService:
     def __init__(self, registry, provider, repository):
         self.registry, self.provider, self.repository = registry, provider, repository
         self.semaphore = asyncio.Semaphore(3)
+        self.schedule_semaphore = asyncio.Semaphore(1)
 
-    async def snapshots(self, client, period):
+    async def snapshots(self, client, period, mode=CheckMode.STANDARD):
         return await asyncio.gather(
-            self.provider.snapshot(client, period.current),
-            self.provider.snapshot(client, period.previous),
+            self.provider.snapshot(client, period.current, quick=mode == CheckMode.SUMMARY),
+            self.provider.snapshot(client, period.previous, quick=mode == CheckMode.SUMMARY),
         )
 
     async def analyze(self, client, period, mode):
+        logger.info("Check queued client=%s mode=%s", client.id, mode)
         async with self.semaphore:
-            current, previous = await self.snapshots(client, period)
+            logger.info("Check started client=%s mode=%s", client.id, mode)
+            stage(f"{client.name}: получаю данные Яндекса")
+            current, previous = await self.snapshots(client, period, mode)
             health = tracking_health(client, current, previous, period)
             a, b = snapshot_metrics(current, healthy=health["healthy"]), snapshot_metrics(previous)
             signals = evaluate(client, a, b, period, health, current)
@@ -302,24 +318,42 @@ class CheckService:
         start = monotonic()
         reports, errors = [], []
         try:
+
+            async def analyze_one(client):
+                # A batch must not reserve all foreground slots before a manual request arrives.
+                if trigger == TriggerSource.SCHEDULE:
+                    async with self.schedule_semaphore:
+                        return await self.analyze(client, period, mode)
+                return await self.analyze(client, period, mode)
+
+            logger.info(
+                "Check run started id=%s clients=%s trigger=%s", run_id, len(clients), trigger
+            )
             results = await asyncio.gather(
-                *(self.analyze(c, period, mode) for c in clients), return_exceptions=True
+                *(analyze_one(c) for c in clients), return_exceptions=True
             )
             for client, result in zip(clients, results, strict=True):
                 if isinstance(result, BaseException):
                     errors.append(
-                        f"{client.id}: проверка завершилась ошибкой; остальные клиенты обработаны."
+                        f"{client.name}: проверка завершилась ошибкой; остальные клиенты обработаны."
                     )
                 else:
                     reports.append(result)
                     if any(v == "unavailable" for v in result.source_status.values()):
-                        errors.append(f"{client.id}: один или несколько источников недоступны.")
+                        errors.append(f"{client.name}: один или несколько источников недоступны.")
             text = (
                 detailed(reports[0])
                 if len(clients) == 1 and reports and mode != CheckMode.SUMMARY
                 else compact(reports, period, errors, mode == CheckMode.SUMMARY)
             )
             await self.repository.finish_run(run_id, reports, errors, text, monotonic() - start)
+            logger.info(
+                "Check run finished id=%s reports=%s errors=%s elapsed=%.1fs",
+                run_id,
+                len(reports),
+                len(errors),
+                monotonic() - start,
+            )
             return reports, text
         except BaseException:
             await self.repository.finish_run(

@@ -106,7 +106,7 @@ class MockProvider:
             campaigns_status=DataStatus.OK,
         )
 
-    async def snapshot(self, client, period):
+    async def snapshot(self, client, period, *, quick=False):
         direct = await self.breakdown(client, period)
         missing = client.mock_scenario == "unavailable"
         goals = [

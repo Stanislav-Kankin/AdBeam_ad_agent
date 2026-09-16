@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import secrets
 from time import monotonic
 
@@ -7,6 +8,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.analytics.periods import make_period
+from app.analytics.progress import progress_state
 from app.bot.commands import HELP, parse_command
 from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
@@ -38,15 +40,37 @@ def build_dispatcher(runtime):
 
     async def launch(message, user_id, client_ids, period, mode):
         async def work():
-            await message.answer("Проверка началась. Пришлю результат сюда.")
-            _, text = await runtime.checks.run_check(
-                client_ids,
-                make_period(period),
-                mode,
-                TriggerSource.TELEGRAM,
-                chat_id=message.chat.id,
-            )
-            await send_text(message.bot, message.chat.id, text)
+            state = {"stage": "ожидаю свободного места в очереди"}
+            token = progress_state.set(state)
+            started = monotonic()
+
+            async def notify_progress():
+                while True:
+                    await asyncio.sleep(20)
+                    try:
+                        async with asyncio.timeout(5):
+                            await message.answer(
+                                f"⏳ {int(monotonic() - started)} с: {state['stage']}."
+                            )
+                    except Exception:
+                        logging.getLogger(__name__).warning("Could not deliver check progress")
+
+            pulse = asyncio.create_task(notify_progress())
+            try:
+                await message.answer("Проверка началась. Пришлю результат сюда.")
+                _, text = await runtime.checks.run_check(
+                    client_ids,
+                    make_period(period),
+                    mode,
+                    TriggerSource.TELEGRAM,
+                    chat_id=message.chat.id,
+                )
+                state["stage"] = "отправляю результат"
+                await send_text(message.bot, message.chat.id, text)
+            finally:
+                pulse.cancel()
+                await asyncio.gather(pulse, return_exceptions=True)
+                progress_state.reset(token)
 
         async def failed():
             await message.answer(

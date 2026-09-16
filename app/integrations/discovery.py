@@ -47,12 +47,15 @@ class AccountDiscovery:
                     result = data["result"]
                     for raw in result["Clients"]:
                         login = raw["Login"]
-                        # Display login: ClientInfo may be a person's name, not a company.
+                        label = str(raw.get("ClientInfo") or "").strip()
+                        name = (
+                            f"{label[:55]} · {login}"[:100] if label and label != login else login
+                        )
                         cid = "yd_" + hashlib.sha256(login.encode()).hexdigest()[:24]
                         found[cid] = Client(
                             id=cid,
-                            name=login,
-                            aliases=[login],
+                            name=name,
+                            aliases=[login, label] if label else [login],
                             direct=DirectConfig(client_login=login),
                             metrica=MetricaConfig(),
                             telegram=TelegramConfig(allowed_chat_ids=chats),
