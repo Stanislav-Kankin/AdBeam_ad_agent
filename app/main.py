@@ -6,6 +6,7 @@ from pathlib import Path
 from time import time
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
 from alembic import command
 from alembic.config import Config
@@ -33,6 +34,25 @@ async def heartbeat():
     while True:
         await asyncio.to_thread(path.write_text, str(time()), encoding="ascii")
         await asyncio.sleep(30)
+
+
+async def register_commands(bot, commands):
+    """Command hints are optional; Telegram polling must not wait for them."""
+    for attempt in range(3):
+        try:
+            async with asyncio.timeout(10):
+                await bot.set_my_commands(
+                    [BotCommand(command=name, description=text) for name, text in commands],
+                    request_timeout=10,
+                )
+            logger.info("Telegram command menu registered")
+            return
+        except (TimeoutError, TelegramAPIError) as exc:
+            logger.warning(
+                "Telegram command menu unavailable (%s); polling is independent", type(exc).__name__
+            )
+        if attempt < 2:
+            await asyncio.sleep(5)
 
 
 async def run_bot(runtime):
@@ -71,11 +91,9 @@ async def run_bot(runtime):
             ("schedule", "Расписание"),
             ("cancel", "Отменить выбор"),
         ]
-        await bot.set_my_commands(
-            [BotCommand(command=name, description=text) for name, text in commands]
-        )
         dp = build_dispatcher(runtime)
         pulse = asyncio.create_task(heartbeat())
+        menu_task = asyncio.create_task(register_commands(bot, commands))
         try:
             logger.info("AdBeam started in %s mode", settings.app_mode)
             await dp.start_polling(
@@ -83,7 +101,8 @@ async def run_bot(runtime):
             )
         finally:
             pulse.cancel()
-            await asyncio.gather(pulse, return_exceptions=True)
+            menu_task.cancel()
+            await asyncio.gather(pulse, menu_task, return_exceptions=True)
             # Drain jobs before the Bot session closes.
             runtime.schedule.close()
             await runtime.jobs.close()
