@@ -1,13 +1,14 @@
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
 
 from app.analytics.metrics import calculate, change, compare
-from app.analytics.periods import today_moscow
+from app.analytics.periods import DateRange, today_moscow
 from app.analytics.progress import stage
 from app.analytics.rules import evaluate, tracking_health
+from app.analytics.warehouse import combine_daily
 from app.domain.reports import (
     CheckMode,
     ClientReport,
@@ -82,7 +83,23 @@ class CheckService:
                 period.end,
                 quick,
             )
-            return Snapshot.model_validate(cached)
+            result = Snapshot.model_validate(cached)
+            await self.repository.save_daily_snapshot(client.id, period, result, quick=quick)
+            return result
+        daily = await self.repository.daily_snapshots(client.id, period, quick=quick)
+        if daily is not None:
+            logger.info(
+                "Daily warehouse hit client=%s period=%s..%s days=%s",
+                client.id,
+                period.start,
+                period.end,
+                period.days,
+            )
+            result = combine_daily([Snapshot.model_validate(value) for value in daily], period)
+            await self.repository.save_snapshot(
+                client.id, period, result, quick=quick, ttl_minutes=240
+            )
+            return result
         result = await self.provider.snapshot(client, period, quick=quick)
         complete = result.direct.status == DataStatus.OK and result.metrica.status == DataStatus.OK
         age_days = (today_moscow() - period.end).days
@@ -90,7 +107,28 @@ class CheckService:
         await self.repository.save_snapshot(
             client.id, period, result, quick=quick, ttl_minutes=ttl
         )
+        await self.repository.save_daily_snapshot(client.id, period, result, quick=quick)
         return result
+
+    async def warm_next(self, chat_id, days=30):
+        clients = self.registry.visible(chat_id)
+        if not clients:
+            return None
+        yesterday = today_moscow() - timedelta(days=1)
+        oldest = yesterday - timedelta(days=days - 1)
+        existing = await self.repository.fresh_daily_keys(
+            [client.id for client in clients], oldest, yesterday
+        )
+        async with self.schedule_semaphore:
+            for offset in range(days):
+                day = yesterday - timedelta(days=offset)
+                for client in clients:
+                    if (client.id, str(day)) in existing:
+                        continue
+                    logger.info("Warehouse warm client=%s day=%s", client.id, day)
+                    await self.snapshot(client, DateRange(start=day, end=day), quick=False)
+                    return client.id, day
+        return None
 
     async def analyze(self, client, period, mode):
         logger.info("Check queued client=%s mode=%s", client.id, mode)

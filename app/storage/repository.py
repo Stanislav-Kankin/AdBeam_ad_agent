@@ -9,6 +9,7 @@ from app.storage.models import (
     ClientCounter,
     ClientPreference,
     ConversationState,
+    DailySnapshot,
     Delivery,
     MetricaCounterCatalog,
     Run,
@@ -116,6 +117,90 @@ class Repository:
                 .limit(1)
             )
         return row.payload if row else None
+
+    async def daily_snapshots(self, client_id, period, *, quick=False):
+        qualities = ["full", "quick"] if quick else ["full"]
+        async with self.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(DailySnapshot)
+                    .where(
+                        DailySnapshot.app_mode == self.app_mode,
+                        DailySnapshot.client_id == client_id,
+                        DailySnapshot.day >= str(period.start),
+                        DailySnapshot.day <= str(period.end),
+                        DailySnapshot.quality.in_(qualities),
+                        DailySnapshot.refresh_after > datetime.now(UTC),
+                    )
+                    .order_by(DailySnapshot.day, DailySnapshot.quality.asc())
+                )
+            ).all()
+        by_day = {}
+        for row in rows:
+            by_day.setdefault(row.day, row.payload)
+        if len(by_day) != period.days:
+            return None
+        return [by_day[str(period.start + timedelta(days=offset))] for offset in range(period.days)]
+
+    async def save_daily_snapshot(self, client_id, period, snapshot, *, quick=False):
+        if period.days != 1:
+            return
+        quality = "quick" if quick else "full"
+        key = (self.app_mode, client_id, str(period.start), quality)
+        captured = datetime.now(UTC)
+        complete = all(
+            value.value == "ok" for value in (snapshot.direct.status, snapshot.metrica.status)
+        )
+        age_days = (datetime.now(UTC).date() - period.end).days
+        refresh_in = timedelta(hours=4 if age_days <= 3 else 24 * 30)
+        if not complete:
+            refresh_in = timedelta(minutes=10)
+        async with self.sessions.begin() as session:
+            row = await session.get(DailySnapshot, key)
+            if row is None:
+                row = DailySnapshot(
+                    app_mode=key[0], client_id=key[1], day=key[2], quality=key[3],
+                    payload={}, refresh_after=captured,
+                )
+                session.add(row)
+            row.payload = safe_json(snapshot.model_dump(mode="json"))
+            row.complete = complete
+            row.captured_at = captured
+            row.refresh_after = captured + refresh_in
+
+    async def has_fresh_daily_snapshot(self, client_id, day):
+        async with self.sessions() as session:
+            return bool(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(DailySnapshot)
+                    .where(
+                        DailySnapshot.app_mode == self.app_mode,
+                        DailySnapshot.client_id == client_id,
+                        DailySnapshot.day == str(day),
+                        DailySnapshot.quality == "full",
+                        DailySnapshot.refresh_after > datetime.now(UTC),
+                    )
+                )
+            )
+
+    async def fresh_daily_keys(self, client_ids, start, end):
+        if not client_ids:
+            return set()
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(DailySnapshot.client_id, DailySnapshot.day).where(
+                        DailySnapshot.app_mode == self.app_mode,
+                        DailySnapshot.client_id.in_(client_ids),
+                        DailySnapshot.day >= str(start),
+                        DailySnapshot.day <= str(end),
+                        DailySnapshot.quality == "full",
+                        DailySnapshot.refresh_after > datetime.now(UTC),
+                    )
+                )
+            ).all()
+        return {(client_id, day) for client_id, day in rows}
 
     async def save_snapshot(self, client_id, period, snapshot, *, quick=False, ttl_minutes=60):
         quality = "quick" if quick else "full"
@@ -233,6 +318,12 @@ class Repository:
                 delete(SnapshotCache).where(
                     SnapshotCache.app_mode == self.app_mode,
                     SnapshotCache.client_id == client_id,
+                )
+            )
+            await session.execute(
+                delete(DailySnapshot).where(
+                    DailySnapshot.app_mode == self.app_mode,
+                    DailySnapshot.client_id == client_id,
                 )
             )
 

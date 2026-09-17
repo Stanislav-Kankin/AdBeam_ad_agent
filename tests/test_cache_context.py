@@ -1,6 +1,7 @@
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
-from app.analytics.periods import make_period
+from app.analytics.periods import DateRange, make_period, today_moscow
 from app.domain.reports import CheckMode
 from app.integrations.deepseek import LLMMessage
 
@@ -23,6 +24,33 @@ async def test_full_snapshot_satisfies_quick_request(runtime, client):
     await runtime.checks.snapshots(client, period, CheckMode.STANDARD)
     await runtime.checks.snapshots(client, period, CheckMode.SUMMARY)
     assert spy.await_count == 2
+
+
+async def test_period_is_composed_from_persisted_daily_snapshots(runtime, client):
+    spy = AsyncMock(wraps=runtime.checks.provider.snapshot)
+    runtime.checks.provider.snapshot = spy
+    end = today_moscow() - timedelta(days=4)
+    start = end - timedelta(days=2)
+    daily = []
+    for offset in range(3):
+        day = start + timedelta(days=offset)
+        daily.append(
+            await runtime.checks.snapshot(client, DateRange(start=day, end=day), quick=False)
+        )
+    combined = await runtime.checks.snapshot(client, DateRange(start=start, end=end), quick=False)
+    assert spy.await_count == 3
+    assert combined.direct.totals.spend == sum(item.direct.totals.spend for item in daily)
+    assert combined.metrica.visits == sum(item.metrica.visits for item in daily)
+    assert combined.metrica.users is None
+    assert any("не суммируются по дням" in value for value in combined.metrica.limitations)
+
+
+async def test_warehouse_warm_resumes_with_next_client(runtime):
+    day = today_moscow() - timedelta(days=1)
+    first = await runtime.checks.warm_next(123456789, days=1)
+    second = await runtime.checks.warm_next(123456789, days=1)
+    assert first[1] == second[1] == day
+    assert first[0] != second[0]
 
 
 async def test_conversation_context_survives_new_agent_service(runtime):

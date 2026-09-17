@@ -31,6 +31,20 @@ class DailySchedule:
             max_instances=1,
             coalesce=True,
         )
+        if (
+            self.settings.app_mode == "production"
+            and self.settings.warehouse_enabled
+            and self.settings.telegram_report_chat_id in self.checks.registry.allowed_chats
+        ):
+            self.scheduler.add_job(
+                self.warm_cache,
+                "interval",
+                seconds=self.settings.warehouse_interval_seconds,
+                id="warehouse_warm",
+                next_run_time=datetime.now(MOSCOW) + timedelta(seconds=20),
+                coalesce=True,
+                max_instances=1,
+            )
         if not self.settings.schedule_enabled:
             self.scheduler.start()
             return
@@ -66,6 +80,17 @@ class DailySchedule:
                 max_instances=1,
             )
         self.scheduler.start()
+
+    async def warm_cache(self):
+        try:
+            result = await self.checks.warm_next(
+                self.settings.telegram_report_chat_id,
+                self.settings.warehouse_backfill_days,
+            )
+            if result:
+                logger.info("Warehouse item completed client=%s day=%s", *result)
+        except Exception as exc:
+            logger.warning("Warehouse item failed (%s); it will be retried", type(exc).__name__)
 
     async def catch_up(self):
         now = datetime.now(MOSCOW)

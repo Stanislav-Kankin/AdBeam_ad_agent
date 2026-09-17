@@ -104,6 +104,18 @@ class SnapshotCache(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class DailySnapshot(Base):
+    __tablename__ = "daily_snapshots"
+    app_mode: Mapped[str] = mapped_column(String(20), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    quality: Mapped[str] = mapped_column(String(10), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    refresh_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class ConversationState(Base):
     __tablename__ = "conversation_states"
     app_mode: Mapped[str] = mapped_column(String(20), primary_key=True)

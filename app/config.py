@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     http_retries: int = Field(default=4, ge=0, le=8)
     max_background_jobs: int = Field(default=4, ge=1, le=16)
     history_retention_days: int = Field(default=90, ge=1, le=3650)
+    warehouse_enabled: bool = True
+    warehouse_backfill_days: int = Field(default=30, ge=1, le=365)
+    warehouse_interval_seconds: int = Field(default=120, ge=30, le=3600)
     deepseek_daily_limit: int = Field(default=100, ge=1, le=10000)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
