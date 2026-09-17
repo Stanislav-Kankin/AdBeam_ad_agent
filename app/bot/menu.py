@@ -175,19 +175,37 @@ def install_menu(router, runtime, launch):
                 if counter["selected"] and counter["status"] == "ok"
                 for goal in counter["goals"]
             }
-            ordered = sorted(goals.values(), key=lambda value: value["name"].casefold())
+            selected = set(client.metrica.main_goal_ids)
+            business_words = (
+                "конвер",
+                "заказ",
+                "заяв",
+                "покуп",
+                "звон",
+                "расч",
+                "цен",
+                "оплат",
+            )
+            ordered = sorted(
+                goals.values(),
+                key=lambda value: (
+                    value["id"] not in selected,
+                    not any(word in value["name"].casefold() for word in business_words),
+                    value["name"].casefold(),
+                ),
+            )
             pages = max(1, (len(ordered) + GOAL_PAGE_SIZE - 1) // GOAL_PAGE_SIZE)
             page = min(max(page, 0), pages - 1)
-            selected = set(client.metrica.main_goal_ids)
             text = badge + (
                 f"Основные цели\n{client.name}\n"
-                f"Выбрано: {len(selected)} из 10 · Страница {page + 1} из {pages}"
+                f"Выбрано: {len(selected)} из 10 · Страница {page + 1} из {pages}\n"
+                "Не выбирайте пересекающиеся цели: их достижения суммируются."
             )
             if not ordered:
                 text += "\nКаталог целей ещё не загружен. Обновите доступы."
             for goal in ordered[page * GOAL_PAGE_SIZE : (page + 1) * GOAL_PAGE_SIZE]:
                 row(
-                    ("✅ " if goal["id"] in selected else "▫️ ") + goal["name"][:90],
+                    (("✅ " if goal["id"] in selected else "▫️ ") + goal["name"] + f" · {goal['id']}")[:100],
                     "toggle_goal",
                     client_id=client_id,
                     goal_id=goal["id"],
