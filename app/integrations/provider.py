@@ -31,7 +31,10 @@ class ProductionProvider:
 
     async def breakdown(self, client, period, dimension="campaign"):
         try:
-            return await self.direct.breakdown(client, period, dimension)
+            # Interactive dimensions are diagnostic top slices. Keeping at most one
+            # 10k-row page prevents large accounts from exhausting bot memory. The
+            # complete feed belongs in the background warehouse, not in a chat job.
+            return await self.direct.breakdown(client, period, dimension, max_pages=1)
         except Exception as exc:
             return DirectData(
                 status=DataStatus.UNAVAILABLE, period=period, limitations=[error_code(exc)]

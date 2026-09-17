@@ -92,6 +92,27 @@ async def test_direct_report_paginates_until_short_page(client, monkeypatch):
     assert not result.limitations
 
 
+async def test_direct_report_page_cap_returns_top_slice(client, monkeypatch):
+    monkeypatch.setenv("DIRECT_OAUTH_TOKEN", "test-token-not-real")
+    monkeypatch.setattr("app.integrations.direct.REPORT_PAGE_SIZE", 2)
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        header = TSV.splitlines()[0]
+        rows = ["101\tOne\t10\t2\t3\t1", "102\tTwo\t20\t4\t6\t2"]
+        return httpx.Response(200, text=header + "\n" + "\n".join(rows) + "\n")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await DirectAdapter(ReadTransport(http)).breakdown(
+            client, make_period().current, max_pages=1
+        )
+    assert calls == 1
+    assert result.status == DataStatus.INSUFFICIENT
+    assert "2 строками" in result.limitations[0]
+
+
 async def test_http_does_not_retry_auth_or_expose_response():
     count = 0
 

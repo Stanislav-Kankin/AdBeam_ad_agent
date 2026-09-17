@@ -12,6 +12,7 @@ from app.domain.reports import (
     CheckMode,
     ClientReport,
     DataStatus,
+    DirectData,
     Metrics,
     Signal,
     Snapshot,
@@ -188,14 +189,27 @@ class CheckService:
                     ("device", "устройства"),
                     *(
                         [("geo", "география"), ("search", "запросы"), ("placement", "площадки")]
-                        if signals or mode == CheckMode.DEEP
+                        if mode == CheckMode.DEEP
                         else []
                     ),
                 ]:
-                    cur, prev = await asyncio.gather(
-                        self.provider.breakdown(client, period.current, dim),
-                        self.provider.breakdown(client, period.previous, dim),
-                    )
+                    stage(f"{client.name}: анализирую разрез «{label}»")
+                    try:
+                        async with asyncio.timeout(90):
+                            cur, prev = await asyncio.gather(
+                                self.provider.breakdown(client, period.current, dim),
+                                self.provider.breakdown(client, period.previous, dim),
+                            )
+                    except TimeoutError:
+                        cur = DirectData(
+                            status=DataStatus.UNAVAILABLE,
+                            period=period.current,
+                            limitations=[
+                                f"Разрез «{label}» не загрузился за 90 секунд; "
+                                "основной отчёт продолжен без него."
+                            ],
+                        )
+                        prev = cur.model_copy(update={"period": period.previous})
                     checks[label] = (
                         cur.status.value if prev.status == DataStatus.OK else prev.status.value
                     )

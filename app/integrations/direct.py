@@ -3,6 +3,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 from decimal import Decimal
 
 from app.analytics.metrics import aggregate
@@ -22,6 +23,8 @@ DIMENSIONS = {
 }
 REPORT_PAGE_SIZE = 10000
 REPORT_MAX_PAGES = 100
+
+logger = logging.getLogger(__name__)
 
 
 def parse_tsv(text: str, goals: list[str], attribution: str, fields: list[str]):
@@ -74,7 +77,9 @@ class DirectAdapter:
             "skipColumnHeader": "false",
         }
 
-    async def breakdown(self, client, period, dimension="campaign"):
+    async def breakdown(
+        self, client, period, dimension="campaign", *, max_pages=REPORT_MAX_PAGES
+    ):
         report_type, fields = DIMENSIONS[dimension]
         params = {
             "SelectionCriteria": {"DateFrom": str(period.start), "DateTo": str(period.end)},
@@ -97,7 +102,14 @@ class DirectAdapter:
                 {"Field": "AdNetworkType", "Operator": "EQUALS", "Values": ["AD_NETWORK"]}
             ]
         rows, limited = [], False
-        for page in range(REPORT_MAX_PAGES):
+        for page in range(max_pages):
+            logger.info(
+                "Direct report page client=%s dimension=%s page=%s max_pages=%s",
+                client.id,
+                dimension,
+                page + 1,
+                max_pages,
+            )
             page_params = {
                 **params,
                 "Page": {"Limit": REPORT_PAGE_SIZE, "Offset": page * REPORT_PAGE_SIZE},
@@ -137,7 +149,11 @@ class DirectAdapter:
             period=period,
             rows=rows,
             totals=aggregate([r.totals for r in rows]),
-            limitations=["Достигнут защитный лимит 1 000 000 строк; итоги неполные."]
+            limitations=[
+                f"Разрез «{dimension}» ограничен первыми "
+                f"{max_pages * REPORT_PAGE_SIZE:,} строками с наибольшим расходом; "
+                "итоги разреза неполные."
+            ]
             if limited
             else [],
         )

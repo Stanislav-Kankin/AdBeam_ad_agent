@@ -180,3 +180,19 @@ async def test_summary_does_not_request_dimensions(runtime, monkeypatch):
         runtime.registry.clients["fresh_parfum"], make_period(), CheckMode.SUMMARY
     )
     assert report.checks["устройства"] == "not_checked"
+
+
+async def test_standard_with_signals_does_not_request_heavy_dimensions(runtime, monkeypatch):
+    requested = []
+    original = runtime.checks.provider.breakdown
+
+    async def recording(client, period, dimension="campaign"):
+        requested.append(dimension)
+        return await original(client, period, dimension)
+
+    monkeypatch.setattr(runtime.checks.provider, "breakdown", recording)
+    await runtime.checks.analyze(
+        runtime.registry.clients["west_export"], make_period(), CheckMode.STANDARD
+    )
+    assert "device" in requested
+    assert not {"geo", "search", "placement"}.intersection(requested)

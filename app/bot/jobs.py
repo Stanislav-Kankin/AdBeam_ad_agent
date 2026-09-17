@@ -19,7 +19,7 @@ class BackgroundJobs:
 
         async def run():
             try:
-                async with asyncio.timeout(900):
+                async with asyncio.timeout(600):
                     await work()
             except asyncio.CancelledError:
                 raise
