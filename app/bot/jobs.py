@@ -11,6 +11,11 @@ class BackgroundJobs:
     def start(self, key, work, on_error):
         if key in self.tasks or len(self.tasks) >= self.limit:
             return False
+        if (
+            isinstance(key, tuple)
+            and sum(isinstance(k, tuple) and k[0] == key[0] for k in self.tasks) >= 2
+        ):
+            return False
 
         async def run():
             try:

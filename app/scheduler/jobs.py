@@ -21,7 +21,18 @@ class DailySchedule:
         self.lock = asyncio.Lock()
 
     def start(self):
+        self.scheduler.add_job(
+            self.checks.repository.purge,
+            "interval",
+            hours=24,
+            kwargs={"days": self.settings.history_retention_days},
+            id="purge_history",
+            next_run_time=datetime.now(MOSCOW),
+            max_instances=1,
+            coalesce=True,
+        )
         if not self.settings.schedule_enabled:
+            self.scheduler.start()
             return
         chat = self.settings.telegram_report_chat_id
         if chat not in self.checks.registry.allowed_chats:

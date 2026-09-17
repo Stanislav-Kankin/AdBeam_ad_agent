@@ -11,6 +11,11 @@ services:
       YANDEX_DISCOVER_CLIENTS: 'true'
     volumes:
       - adbeam_data:/app/data
+      - ./config:/app/config:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    pids_limit: 256
     stop_grace_period: 40s
     security_opt:
       - no-new-privileges:true

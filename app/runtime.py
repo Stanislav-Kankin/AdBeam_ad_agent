@@ -15,6 +15,7 @@ from app.integrations.mock import MockProvider
 from app.integrations.offline_llm import OfflineDemoProvider
 from app.integrations.provider import ProductionProvider
 from app.integrations.roistat import RoistatAdapter
+from app.security import refresh_secrets
 from app.storage.database import database
 from app.storage.repository import Repository
 
@@ -42,6 +43,7 @@ class Runtime:
 
 
 def build_runtime(settings):
+    refresh_secrets()
     registry = load_clients(settings)
     engine, sessions = database(settings.database_url)
     http = httpx.AsyncClient(timeout=settings.http_timeout_seconds, follow_redirects=False)
@@ -64,7 +66,11 @@ def build_runtime(settings):
         settings,
         registry,
         checks,
-        AgentService(checks, llm),
+        AgentService(
+            checks,
+            llm,
+            settings.deepseek_daily_limit if isinstance(llm, DeepSeekProvider) else None,
+        ),
         BackgroundJobs(settings.max_background_jobs),
         engine,
         http,

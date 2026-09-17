@@ -1,4 +1,5 @@
 import asyncio
+import re
 import secrets
 from time import monotonic
 
@@ -43,7 +44,9 @@ async def send_part(bot, chat_id, text, entities=None):
 
 def build_dispatcher(runtime):
     dp, router = Dispatcher(), Router()
-    middleware = AccessMiddleware(runtime.settings.telegram_allowed_chat_ids)
+    middleware = AccessMiddleware(
+        runtime.settings.telegram_allowed_chat_ids, runtime.settings.telegram_allowed_user_ids
+    )
     router.message.outer_middleware(middleware)
     router.callback_query.outer_middleware(middleware)
     pending = {}
@@ -62,6 +65,7 @@ def build_dispatcher(runtime):
                     mode,
                     TriggerSource.TELEGRAM,
                     chat_id=message.chat.id,
+                    user_id=user_id,
                 )
                 state["stage"] = "отправляю результат"
                 await presentation.finish(text)
@@ -190,6 +194,19 @@ def build_dispatcher(runtime):
 
     @router.message(F.text)
     async def question(message):
+        if message.chat.type != "private":
+            me = await message.bot.me()
+            reply = message.reply_to_message
+            replied = bool(reply and reply.from_user and reply.from_user.id == me.id)
+            mentioned = bool(
+                me.username
+                and re.search(
+                    r"(?<!\w)@" + re.escape(me.username) + r"(?!\w)", message.text, re.IGNORECASE
+                )
+            )
+            if not replied and not mentioned:
+                return
+
         async def work():
             await message.answer("Разбираю вопрос и проверяю данные.")
             answer = await runtime.agent.ask(message.text, message.chat.id, message.from_user.id)

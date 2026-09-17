@@ -14,7 +14,11 @@ class StrictModel(BaseModel):
 class DirectConfig(StrictModel):
     client_login: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9_.@-]+$")
     main_goal_ids: list[GoalId] = Field(default_factory=list, max_length=10)
-    token_env: str = "DIRECT_OAUTH_TOKEN"
+    token_env: str = Field(
+        default="DIRECT_OAUTH_TOKEN",
+        pattern=r"^(?:DIRECT|ADBEAM)_[A-Z0-9_]*(?:TOKEN|API_KEY)$",
+        max_length=100,
+    )
     attribution_model: Literal["AUTO", "LC", "FCCD", "LSCCD"] = "LC"
     timezone: Literal["Europe/Moscow"] = "Europe/Moscow"
 
@@ -22,7 +26,11 @@ class DirectConfig(StrictModel):
 class MetricaConfig(StrictModel):
     counter_id: int | None = Field(default=None, gt=0)
     main_goal_ids: list[GoalId] = Field(default_factory=list, max_length=10)
-    token_env: str = "METRICA_OAUTH_TOKEN"
+    token_env: str = Field(
+        default="METRICA_OAUTH_TOKEN",
+        pattern=r"^(?:METRICA|ADBEAM)_[A-Z0-9_]*(?:TOKEN|API_KEY)$",
+        max_length=100,
+    )
 
 
 class Targets(StrictModel):
@@ -51,7 +59,11 @@ class RoistatFilter(StrictModel):
 class RevenueConfig(StrictModel):
     source: Literal["none", "metrica_ecommerce", "roistat"] = "none"
     roistat_project_id: int | None = Field(default=None, gt=0)
-    token_env: str = "ROISTAT_API_KEY"
+    token_env: str = Field(
+        default="ROISTAT_API_KEY",
+        pattern=r"^(?:ROISTAT|ADBEAM)_[A-Z0-9_]*(?:TOKEN|API_KEY)$",
+        max_length=100,
+    )
     roistat_filters: list[RoistatFilter] = Field(default_factory=list)
     currency: Literal["RUB"] = "RUB"
     attribution_confirmed: bool = False

@@ -2,10 +2,15 @@
 
 import asyncio
 import hashlib
+import logging
+
+from pydantic import ValidationError
 
 from app.config import secret_from_env
 from app.domain.clients import Client, DirectConfig, MetricaConfig, TelegramConfig
 from app.integrations.http import IntegrationError
+
+logger = logging.getLogger(__name__)
 
 
 class AccountDiscovery:
@@ -45,21 +50,14 @@ class AccountDiscovery:
                         },
                     )
                     result = data["result"]
-                    for raw in result["Clients"]:
-                        login = raw["Login"]
-                        label = str(raw.get("ClientInfo") or "").strip()
-                        name = (
-                            f"{label[:55]} · {login}"[:100] if label and label != login else login
-                        )
-                        cid = "yd_" + hashlib.sha256(login.encode()).hexdigest()[:24]
-                        found[cid] = Client(
-                            id=cid,
-                            name=name,
-                            aliases=[login, label] if label else [login],
-                            direct=DirectConfig(client_login=login),
-                            metrica=MetricaConfig(),
-                            telegram=TelegramConfig(allowed_chat_ids=chats),
-                        )
+                    for index, raw in enumerate(result["Clients"]):
+                        try:
+                            client = self.build_client(raw, chats)
+                            found[client.id] = client
+                        except (ValidationError, KeyError, TypeError, ValueError, AttributeError):
+                            logger.warning(
+                                "Skipped invalid Yandex client/override at index=%s", offset + index
+                            )
                     next_offset = result.get("LimitedBy")
                     if next_offset is None:
                         break
@@ -72,6 +70,27 @@ class AccountDiscovery:
                 raise
             self.registry.clients = dict(sorted(found.items(), key=lambda item: item[1].name))
             return len(found)
+
+    def build_client(self, raw, chats):
+        login = raw["Login"]
+        label = str(raw.get("ClientInfo") or "").strip()
+        name = f"{label[:55]} · {login}"[:100] if label and label != login else login
+        base = Client(
+            id="yd_" + hashlib.sha256(login.encode()).hexdigest()[:24],
+            name=name,
+            aliases=[login, label] if label else [login],
+            direct=DirectConfig(client_login=login),
+            metrica=MetricaConfig(),
+            telegram=TelegramConfig(allowed_chat_ids=chats),
+        ).model_dump()
+        override = self.registry.overrides.get(login, {})
+        # Identity and ACL come from the authorized account, never from a demo YAML.
+        for field in ("direct", "metrica", "targets", "revenue"):
+            if field in override:
+                base[field] = {**base[field], **override[field]}
+        if "active" in override:
+            base["active"] = override["active"]
+        return Client.model_validate(base)
 
 
 async def campaign_counters(transport, client):

@@ -141,6 +141,9 @@ async def test_ambiguity_and_cancel(runtime):
 
 def test_redaction_preserves_dates_and_decimal_values(monkeypatch):
     monkeypatch.setenv("TEST_API_KEY", "private-test-secret")
+    from app.security import refresh_secrets
+
+    refresh_secrets()
     text = "2026-09-16 13:43:39 private-test-secret a@example.org +7 (999) 123-45-67 26.66666666666666666667"
     result = redact(text)
     assert (

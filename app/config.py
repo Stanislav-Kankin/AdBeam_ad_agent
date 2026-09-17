@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_allowed_chat_ids: list[int] = Field(default_factory=list)
     telegram_admin_user_ids: list[int] = Field(default_factory=list)
+    telegram_allowed_user_ids: list[int] = Field(default_factory=list)
     telegram_report_chat_id: int | None = None
     schedule_enabled: bool = True
     schedule_hour: int = Field(default=10, ge=0, le=23)
@@ -31,6 +32,8 @@ class Settings(BaseSettings):
     http_timeout_seconds: float = Field(default=30, gt=0, le=120)
     http_retries: int = Field(default=4, ge=0, le=8)
     max_background_jobs: int = Field(default=4, ge=1, le=16)
+    history_retention_days: int = Field(default=90, ge=1, le=3650)
+    deepseek_daily_limit: int = Field(default=100, ge=1, le=10000)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @model_validator(mode="after")
@@ -53,10 +56,13 @@ def load_settings() -> Settings:
 
 
 class ClientRegistry:
-    def __init__(self, clients: list[Client], allowed_chats: list[int], errors=None):
+    def __init__(
+        self, clients: list[Client], allowed_chats: list[int], errors=None, overrides=None
+    ):
         self.clients = {c.id: c for c in clients}
         self.allowed_chats = frozenset(allowed_chats)
         self.errors: list[str] = errors or []
+        self.overrides = overrides or {}
 
     def visible(self, chat_id: int) -> list[Client]:
         if chat_id not in self.allowed_chats:
@@ -82,7 +88,21 @@ class ClientRegistry:
 
 def load_clients(settings: Settings) -> ClientRegistry:
     if settings.app_mode == "production" and settings.yandex_discover_clients:
-        return ClientRegistry([], settings.telegram_allowed_chat_ids)
+        overrides = {}
+        if settings.clients_config.exists():
+            raw = yaml.safe_load(settings.clients_config.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw, dict) or not isinstance(raw.get("clients", []), list):
+                raise ValueError("Конфиг должен содержать список clients.")
+            for item in raw.get("clients", []):
+                if not isinstance(item, dict) or not isinstance(item.get("direct"), dict):
+                    raise ValueError("Для настроек клиента требуется direct.client_login.")
+                login = item["direct"].get("client_login")
+                if not isinstance(login, str) or not login or login in overrides:
+                    raise ValueError(
+                        "Логины настроек клиентов должны быть непустыми и уникальными."
+                    )
+                overrides[login] = item
+        return ClientRegistry([], settings.telegram_allowed_chat_ids, overrides=overrides)
     path = settings.clients_config
     if not path.exists() and settings.app_mode == "mock":
         path = Path("config/clients.example.yaml")

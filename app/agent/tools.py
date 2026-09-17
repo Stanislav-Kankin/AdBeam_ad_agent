@@ -53,7 +53,7 @@ class ToolRegistry:
     def __init__(self, checks):
         self.checks = checks
 
-    async def execute(self, name, arguments, *, chat_id, request_id):
+    async def execute(self, name, arguments, *, chat_id, request_id, user_id=None):
         start, status, error, validated = monotonic(), "ok", None, {}
         try:
             if chat_id not in self.checks.registry.allowed_chats:
@@ -87,7 +87,12 @@ class ToolRegistry:
             }
             if name == "get_account_overview":
                 reports, _ = await self.checks.run_check(
-                    [client.id], period, CheckMode.STANDARD, TriggerSource.AGENT, chat_id=chat_id
+                    [client.id],
+                    period,
+                    CheckMode.STANDARD,
+                    TriggerSource.AGENT,
+                    chat_id=chat_id,
+                    user_id=user_id,
                 )
                 return {**base, "reports": [r.model_dump(mode="json") for r in reports]}
             if name in DIMENSIONS:
@@ -186,6 +191,7 @@ class ToolRegistry:
             await self.checks.repository.tool_event(
                 request_id=request_id,
                 chat_id=str(chat_id),
+                user_id=str(user_id) if user_id is not None else None,
                 tool=name if name in DESCRIPTIONS else "unknown",
                 client_id=validated.get("client_id"),
                 arguments=validated,

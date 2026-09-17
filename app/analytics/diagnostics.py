@@ -309,12 +309,12 @@ class CheckService:
                 generated_at=datetime.now(UTC),
             )
 
-    async def run_check(self, client_ids, period, mode, trigger, *, chat_id):
+    async def run_check(self, client_ids, period, mode, trigger, *, chat_id, user_id=None):
         period.completed()
         # Fail closed before any integration is called, even in scheduled/internal paths.
         clients = [self.registry.require(chat_id, cid) for cid in dict.fromkeys(client_ids)]
         run_id = await self.repository.begin_run(
-            chat_id, [c.id for c in clients], period, mode, trigger
+            chat_id, [c.id for c in clients], period, mode, trigger, user_id=user_id
         )
         start = monotonic()
         reports, errors = [], []
@@ -322,7 +322,7 @@ class CheckService:
 
             async def analyze_one(client):
                 # A batch must not reserve all foreground slots before a manual request arrives.
-                if trigger == TriggerSource.SCHEDULE:
+                if trigger == TriggerSource.SCHEDULE or len(clients) > 1:
                     async with self.schedule_semaphore:
                         return await self.analyze(client, period, mode)
                 return await self.analyze(client, period, mode)

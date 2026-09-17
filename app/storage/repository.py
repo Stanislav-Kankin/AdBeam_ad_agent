@@ -1,7 +1,8 @@
+import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 
 from app.security import redact
 from app.storage.models import Delivery, Run, ToolEvent
@@ -25,12 +26,64 @@ def safe_json(value):
 class Repository:
     def __init__(self, sessions, app_mode):
         self.sessions, self.app_mode = sessions, app_mode
+        self.model_quota_lock = asyncio.Lock()
 
-    async def begin_run(self, chat_id, client_ids, period, mode, trigger):
+    async def reserve_model_call(self, chat_id, user_id, request_id, limit):
+        # One bot process per database. Reservation is persisted before the API call.
+        today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        async with self.model_quota_lock:
+            async with self.sessions.begin() as session:
+                used = await session.scalar(
+                    select(func.count())
+                    .select_from(ToolEvent)
+                    .where(
+                        ToolEvent.app_mode == self.app_mode,
+                        ToolEvent.chat_id == str(chat_id),
+                        ToolEvent.tool == "llm_call",
+                        ToolEvent.created_at >= today,
+                    )
+                )
+                if used >= limit:
+                    return False
+                session.add(
+                    ToolEvent(
+                        request_id=request_id,
+                        app_mode=self.app_mode,
+                        chat_id=str(chat_id),
+                        user_id=str(user_id),
+                        tool="llm_call",
+                        arguments={},
+                        status="reserved",
+                        duration_seconds=0,
+                    )
+                )
+                return True
+
+    async def purge(self, days=90):
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        async with self.sessions.begin() as session:
+            await session.execute(
+                delete(Run).where(Run.app_mode == self.app_mode, Run.started_at < cutoff)
+            )
+            await session.execute(
+                delete(ToolEvent).where(
+                    ToolEvent.app_mode == self.app_mode, ToolEvent.created_at < cutoff
+                )
+            )
+            await session.execute(
+                delete(Delivery).where(
+                    Delivery.key.startswith(self.app_mode + ":"),
+                    Delivery.updated_at < cutoff,
+                    Delivery.status == "sent",
+                )
+            )
+
+    async def begin_run(self, chat_id, client_ids, period, mode, trigger, user_id=None):
         async with self.sessions.begin() as session:
             run = Run(
                 app_mode=self.app_mode,
                 chat_id=str(chat_id),
+                user_id=str(user_id) if user_id is not None else None,
                 client_ids=client_ids,
                 period=period.model_dump(mode="json"),
                 mode=str(mode),

@@ -15,10 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 class AgentService:
-    def __init__(self, checks, llm=None):
+    def __init__(self, checks, llm=None, daily_limit=None):
         self.checks, self.llm = checks, llm
         self.tools = ToolRegistry(checks)
         self.history = {}
+        self.daily_limit = daily_limit
 
     def cancel(self, chat_id, user_id):
         self.history.pop((chat_id, user_id), None)
@@ -33,6 +34,7 @@ class AgentService:
                 text,
                 chat_id,
                 "DeepSeek не подключён. Для свободного анализа настройте DEEPSEEK_API_KEY в .env.",
+                user_id=user_id,
             )
         request_id, start = str(uuid4()), monotonic()
         key = (chat_id, user_id)
@@ -55,6 +57,16 @@ class AgentService:
             async with asyncio.timeout(240):
                 while count <= 8:
                     phase = "llm"
+                    if (
+                        self.daily_limit is not None
+                        and not await self.checks.repository.reserve_model_call(
+                            chat_id, user_id, request_id, self.daily_limit
+                        )
+                    ):
+                        return self.fallback(
+                            evidence,
+                            "Достигнут суточный лимит обращений к DeepSeek для этого чата. Обычные отчёты /check и /summary доступны.",
+                        )
                     logger.info("Agent model started request=%s", request_id)
                     async with asyncio.timeout(45):
                         reply = await self.llm.complete(messages, tool_schemas())
@@ -88,7 +100,11 @@ class AgentService:
                         phase = "tool"
                         analytics_started |= call.name != "list_clients"
                         result = await self.tools.call(
-                            call.name, call.arguments, chat_id=chat_id, request_id=request_id
+                            call.name,
+                            call.arguments,
+                            chat_id=chat_id,
+                            request_id=request_id,
+                            user_id=user_id,
                         )
                         evidence.append(result)
                         messages.append(
@@ -110,6 +126,7 @@ class AgentService:
             await self.checks.repository.tool_event(
                 request_id=request_id,
                 chat_id=str(chat_id),
+                user_id=str(user_id),
                 tool="llm_provider",
                 client_id=None,
                 arguments={},
@@ -129,9 +146,9 @@ class AgentService:
                     message
                     + "\nГотового отчёта нет. Используйте /summary <клиент> для краткой проверки."
                 )
-            return await self.deterministic_fallback(text, chat_id, message)
+            return await self.deterministic_fallback(text, chat_id, message, user_id=user_id)
 
-    async def deterministic_fallback(self, text, chat_id, message):
+    async def deterministic_fallback(self, text, chat_id, message, *, user_id=None):
         question = text.casefold()
         clients = self.checks.registry.visible(chat_id)
         selected = [
@@ -184,6 +201,7 @@ class AgentService:
                 CheckMode.STANDARD,
                 TriggerSource.AGENT,
                 chat_id=chat_id,
+                user_id=user_id,
             )
             return message + "\nДетерминированная стандартная проверка:\n\n" + report
         except Exception:

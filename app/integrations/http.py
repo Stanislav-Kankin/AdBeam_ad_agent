@@ -78,9 +78,19 @@ class ReadTransport:
             return response
 
     async def request(self, source, method, url, *, pending=False, **kwargs):
+        if source == "direct" and pending:
+            try:
+                async with asyncio.timeout(150):
+                    return await self._request(source, method, url, pending=True, **kwargs)
+            except TimeoutError:
+                raise IntegrationError(source, "report_pending_timeout") from None
+        return await self._request(source, method, url, pending=pending, **kwargs)
+
+    async def _request(self, source, method, url, *, pending=False, **kwargs):
         # Log operation only: never headers, query strings, response bodies, or credentials.
         operation = urlsplit(url).path
-        for attempt in range(self.retries + 1):
+        offline = source == "direct" and pending
+        for attempt in range(100 if offline else self.retries + 1):
             started = monotonic()
             logger.info(
                 "API request source=%s operation=%s attempt=%s", source, operation, attempt + 1
@@ -99,7 +109,7 @@ class ReadTransport:
                     operation,
                     monotonic() - started,
                 )
-                if attempt == self.retries:
+                if attempt >= self.retries:
                     raise IntegrationError(source, "network_error") from None
             else:
                 logger.info(
@@ -117,11 +127,12 @@ class ReadTransport:
                 retryable |= pending and response.status_code in (201, 202)
                 if not retryable:
                     raise IntegrationError(source, f"http_{response.status_code}")
-                if attempt == self.retries:
+                waiting = offline and response.status_code in (201, 202)
+                if attempt >= self.retries and not waiting:
                     raise IntegrationError(source, f"retry_exhausted_http_{response.status_code}")
                 hint = response.headers.get("retryIn", response.headers.get("Retry-After", ""))
                 if hint.isdigit():
-                    if int(hint) > 60:
+                    if int(hint) > 60 and not waiting:
                         # Don't retry earlier than the upstream quota allows.
                         raise IntegrationError(source, "retry_later")
                     delay = max(delay, int(hint))
