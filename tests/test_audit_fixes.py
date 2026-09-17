@@ -184,7 +184,15 @@ def test_migration_preserves_old_rows(tmp_path):
             "INSERT INTO tool_events (request_id,app_mode,chat_id,tool,arguments,status,duration_seconds,created_at) VALUES ('old','production','1','test','{}','ok',0,'2026-09-01')"
         )
     command.upgrade(config, "head")
-    assert "user_id" in {c["name"] for c in inspect(engine).get_columns("tool_events")}
+    inspector = inspect(engine)
+    assert "user_id" in {c["name"] for c in inspector.get_columns("tool_events")}
+    assert {
+        "client_preferences",
+        "metrica_counter_catalog",
+        "client_counters",
+        "snapshot_cache",
+        "conversation_states",
+    }.issubset(inspector.get_table_names())
     with engine.connect() as conn:
         assert conn.exec_driver_sql("SELECT request_id,user_id FROM tool_events").one() == (
             "old",

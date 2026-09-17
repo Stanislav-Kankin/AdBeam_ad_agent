@@ -14,6 +14,7 @@ from app.domain.reports import (
     DataStatus,
     Metrics,
     Signal,
+    Snapshot,
     Totals,
     TriggerSource,
 )
@@ -66,9 +67,29 @@ class CheckService:
 
     async def snapshots(self, client, period, mode=CheckMode.STANDARD):
         return await asyncio.gather(
-            self.provider.snapshot(client, period.current, quick=mode == CheckMode.SUMMARY),
-            self.provider.snapshot(client, period.previous, quick=mode == CheckMode.SUMMARY),
+            self.snapshot(client, period.current, quick=mode == CheckMode.SUMMARY),
+            self.snapshot(client, period.previous, quick=mode == CheckMode.SUMMARY),
         )
+
+    async def snapshot(self, client, period, *, quick=False):
+        cached = await self.repository.cached_snapshot(client.id, period, quick=quick)
+        if cached is not None:
+            logger.info(
+                "Snapshot cache hit client=%s period=%s..%s quick=%s",
+                client.id,
+                period.start,
+                period.end,
+                quick,
+            )
+            return Snapshot.model_validate(cached)
+        result = await self.provider.snapshot(client, period, quick=quick)
+        complete = result.direct.status == DataStatus.OK and result.metrica.status == DataStatus.OK
+        age_days = (today_moscow() - period.end).days
+        ttl = 10 if not complete else 1440 if age_days > client.targets.conversion_delay_days else 240
+        await self.repository.save_snapshot(
+            client.id, period, result, quick=quick, ttl_minutes=ttl
+        )
+        return result
 
     async def analyze(self, client, period, mode):
         logger.info("Check queued client=%s mode=%s", client.id, mode)
@@ -306,6 +327,22 @@ class CheckService:
                     for g in current.metrica.goals
                     if g.get("reaches") is not None
                 ],
+                metrica_current={
+                    "visits": current.metrica.visits,
+                    "users": current.metrica.users,
+                    "pageviews": current.metrica.pageviews,
+                    "bounce_rate": current.metrica.bounce_rate,
+                    "page_depth": current.metrica.page_depth,
+                    "avg_visit_duration_seconds": current.metrica.avg_visit_duration_seconds,
+                },
+                metrica_previous={
+                    "visits": previous.metrica.visits,
+                    "users": previous.metrica.users,
+                    "pageviews": previous.metrica.pageviews,
+                    "bounce_rate": previous.metrica.bounce_rate,
+                    "page_depth": previous.metrica.page_depth,
+                    "avg_visit_duration_seconds": previous.metrica.avg_visit_duration_seconds,
+                },
                 mock=self.provider.mock,
                 generated_at=datetime.now(UTC),
             )

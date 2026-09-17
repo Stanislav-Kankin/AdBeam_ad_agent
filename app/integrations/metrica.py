@@ -85,9 +85,21 @@ class MetricaAdapter:
 
     async def overview(self, client, period, campaign_ids, *, budget=165):
         deadline = monotonic() + budget
-        if client.metrica.counter_id is not None:
-            return await self._overview(client, period, campaign_ids, deadline=deadline)
-        counters = await campaign_counters(self.transport, client)
+        configured = client.metrica.selected_counter_ids()
+        if len(configured) == 1:
+            scoped = client.model_copy(
+                update={
+                    "metrica": client.metrica.model_copy(update={"counter_id": configured[0]})
+                }
+            )
+            return await self._overview(
+                scoped,
+                period,
+                campaign_ids,
+                all_goals=not client.metrica.main_goal_ids,
+                deadline=deadline,
+            )
+        counters = configured or await campaign_counters(self.transport, client)
         if not counters:
             return MetricaData(
                 status=DataStatus.NOT_CHECKED,
@@ -106,7 +118,11 @@ class MetricaAdapter:
             )
             try:
                 report = await self._overview(
-                    scoped, period, campaign_ids, all_goals=True, deadline=deadline
+                    scoped,
+                    period,
+                    campaign_ids,
+                    all_goals=not configured or not client.metrica.main_goal_ids,
+                    deadline=deadline,
                 )
                 reports.append(report)
                 limitations.extend(f"Счётчик {counter_id}: {v}" for v in report.limitations)
@@ -131,6 +147,13 @@ class MetricaAdapter:
             else DataStatus.OK,
             period=period,
             visits=reports[0].visits if len(reports) == 1 else None,
+            users=reports[0].users if len(reports) == 1 else None,
+            pageviews=reports[0].pageviews if len(reports) == 1 else None,
+            bounce_rate=reports[0].bounce_rate if len(reports) == 1 else None,
+            page_depth=reports[0].page_depth if len(reports) == 1 else None,
+            avg_visit_duration_seconds=reports[0].avg_visit_duration_seconds
+            if len(reports) == 1
+            else None,
             goals=[g for r in reports for g in r.goals],
             sampled=any(r.sampled for r in reports),
             limitations=limitations,
@@ -156,7 +179,15 @@ class MetricaAdapter:
         queried = list(available) if all_goals else present
         # Commit only complete metric batches across the entire campaign scope.
         # Interrupted batches must not appear as zero or as complete totals.
-        metrics = ["ym:s:visits", *[f"ym:s:goal{g}reaches" for g in queried]]
+        base_metrics = [
+            "ym:s:visits",
+            "ym:s:users",
+            "ym:s:pageviews",
+            "ym:s:bounceRate",
+            "ym:s:pageDepth",
+            "ym:s:avgVisitDurationSeconds",
+        ]
+        metrics = [*base_metrics, *[f"ym:s:goal{g}reaches" for g in queried]]
         values = [None] * len(metrics)
         sampled, limitations = False, []
         for start in range(0, len(metrics), 20):
@@ -180,8 +211,9 @@ class MetricaAdapter:
                 "id": gid,
                 "name": redact(str(g.get("name", gid)))[:150],
                 "primary": gid in present,
-                "reaches": str(values[queried.index(gid) + 1])
-                if gid in queried and values[queried.index(gid) + 1] is not None
+                "reaches": str(values[queried.index(gid) + len(base_metrics)])
+                if gid in queried
+                and values[queried.index(gid) + len(base_metrics)] is not None
                 else None,
                 "counter_id": client.metrica.counter_id,
                 "type": g.get("type", ""),
@@ -196,6 +228,11 @@ class MetricaAdapter:
             else DataStatus.EMPTY,
             period=period,
             visits=int(values[0]) if values[0] is not None else None,
+            users=int(values[1]) if values[1] is not None else None,
+            pageviews=int(values[2]) if values[2] is not None else None,
+            bounce_rate=values[3],
+            page_depth=values[4],
+            avg_visit_duration_seconds=values[5],
             goals=goals,
             missing_goal_ids=missing,
             sampled=sampled,

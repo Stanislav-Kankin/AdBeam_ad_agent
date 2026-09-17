@@ -148,7 +148,7 @@ async def test_auto_counters_keep_all_goals_separate(client, monkeypatch):
             200,
             json={
                 "query": {"date1": str(period.start), "date2": str(period.end)},
-                "totals": [100, 7],
+                "totals": [100, 90, 200, 20, 2, 60, 7],
             },
         )
 

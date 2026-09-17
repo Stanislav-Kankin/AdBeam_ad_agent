@@ -66,6 +66,11 @@ class MetricaData(BaseModel):
     status: DataStatus
     period: DateRange
     visits: int | None = None
+    users: int | None = None
+    pageviews: int | None = None
+    bounce_rate: Decimal | None = None
+    page_depth: Decimal | None = None
+    avg_visit_duration_seconds: Decimal | None = None
     goals: list[dict] = Field(default_factory=list)
     missing_goal_ids: list[str] = Field(default_factory=list)
     sampled: bool = False
@@ -119,5 +124,7 @@ class ClientReport(BaseModel):
     main_goal_ids: list[str] = Field(default_factory=list)
     goal_scope: Literal["counter", "direct_campaigns"] = "counter"
     goal_metrics: list[dict] = Field(default_factory=list)
+    metrica_current: dict = Field(default_factory=dict)
+    metrica_previous: dict = Field(default_factory=dict)
     mock: bool = False
     generated_at: datetime

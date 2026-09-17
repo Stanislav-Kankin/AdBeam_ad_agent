@@ -10,6 +10,7 @@ from app.integrations.deepseek import DeepSeekProvider
 from app.integrations.direct import DirectAdapter
 from app.integrations.discovery import AccountDiscovery
 from app.integrations.http import ReadTransport
+from app.integrations.inventory import MetricaInventory
 from app.integrations.metrica import MetricaAdapter
 from app.integrations.mock import MockProvider
 from app.integrations.offline_llm import OfflineDemoProvider
@@ -31,6 +32,7 @@ class Runtime:
     http: httpx.AsyncClient
     schedule: object = None
     discovery: object = None
+    inventory: object = None
 
     async def close(self):
         if self.schedule:
@@ -76,5 +78,6 @@ def build_runtime(settings):
         http,
     )
     if settings.app_mode == "production" and settings.yandex_discover_clients:
-        runtime.discovery = AccountDiscovery(transport, registry, settings)
+        runtime.discovery = AccountDiscovery(transport, registry, settings, repo)
+        runtime.inventory = MetricaInventory(transport, repo, registry)
     return runtime

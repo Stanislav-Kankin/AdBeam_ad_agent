@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 class AccountDiscovery:
-    def __init__(self, transport, registry, settings):
+    def __init__(self, transport, registry, settings, repository=None):
         self.transport, self.registry, self.settings = transport, registry, settings
+        self.repository = repository
         self.lock = asyncio.Lock()
 
     async def refresh(self):
@@ -53,6 +54,8 @@ class AccountDiscovery:
                     for index, raw in enumerate(result["Clients"]):
                         try:
                             client = self.build_client(raw, chats)
+                            if self.repository:
+                                client = await self.repository.configure_client(client)
                             found[client.id] = client
                         except (ValidationError, KeyError, TypeError, ValueError, AttributeError):
                             logger.warning(

@@ -25,12 +25,23 @@ class DirectConfig(StrictModel):
 
 class MetricaConfig(StrictModel):
     counter_id: int | None = Field(default=None, gt=0)
+    counter_ids: list[int] = Field(default_factory=list, max_length=20)
     main_goal_ids: list[GoalId] = Field(default_factory=list, max_length=10)
     token_env: str = Field(
         default="METRICA_OAUTH_TOKEN",
         pattern=r"^(?:METRICA|ADBEAM)_[A-Z0-9_]*(?:TOKEN|API_KEY)$",
         max_length=100,
     )
+
+    @model_validator(mode="after")
+    def unique_counters(self):
+        values = [*(self.counter_ids or []), *([self.counter_id] if self.counter_id else [])]
+        if len(values) != len(set(values)):
+            raise ValueError("Duplicate counter IDs")
+        return self
+
+    def selected_counter_ids(self) -> list[int]:
+        return [*(self.counter_ids or []), *([self.counter_id] if self.counter_id else [])]
 
 
 class Targets(StrictModel):

@@ -68,6 +68,30 @@ async def test_direct_pending_retries_identical_read_request(client, monkeypatch
     assert json.loads(requests[0].content)["params"]["Goals"] == ["123456"]
 
 
+async def test_direct_report_paginates_until_short_page(client, monkeypatch):
+    monkeypatch.setenv("DIRECT_OAUTH_TOKEN", "test-token-not-real")
+    monkeypatch.setattr("app.integrations.direct.REPORT_PAGE_SIZE", 2)
+    offsets = []
+
+    def handler(request):
+        params = json.loads(request.content)["params"]
+        offset = params["Page"]["Offset"]
+        offsets.append(offset)
+        header = TSV.splitlines()[0]
+        rows = {
+            0: ["101\tOne\t10\t2\t3\t1", "102\tTwo\t20\t4\t6\t2"],
+            2: ["103\tThree\t30\t6\t9\t3"],
+        }[offset]
+        return httpx.Response(200, text=header + "\n" + "\n".join(rows) + "\n")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await DirectAdapter(ReadTransport(http)).breakdown(client, make_period().current)
+    assert offsets == [0, 2]
+    assert len(result.rows) == 3
+    assert result.totals.spend == 18
+    assert not result.limitations
+
+
 async def test_http_does_not_retry_auth_or_expose_response():
     count = 0
 
@@ -129,11 +153,12 @@ def metrica_handler(period, *, sampled=False, timezone="Europe/Moscow", missing=
         assert "filters" not in query
         assert query["accuracy"] == "full"
         metrics = query["metrics"].split(",")
+        values = [100, 90, 200, 20, 2, 60, 5]
         return httpx.Response(
             200,
             json={
                 "query": {"date1": str(period.start), "date2": str(period.end)},
-                "totals": [100, 5][: len(metrics)],
+                "totals": values[: len(metrics)],
                 "sampled": sampled,
             },
         )

@@ -17,7 +17,7 @@ from alembic import command
 from alembic.config import Config
 
 from app.analytics.periods import make_period
-from app.bot.handlers import build_dispatcher, send_part
+from app.bot.handlers import build_dispatcher, send_text
 from app.config import Settings, load_settings
 from app.domain.reports import CheckMode, TriggerSource
 from app.runtime import build_runtime
@@ -100,9 +100,9 @@ async def run_bot(runtime):
     async with Bot(token=token) as bot:
 
         async def send(chat, text):
-            await send_part(bot, chat, text)
+            await send_text(bot, chat, text, markdown=True)
 
-        runtime.schedule = DailySchedule(settings, runtime.checks, send)
+        runtime.schedule = DailySchedule(settings, runtime.checks, send, runtime.agent)
         commands = [
             ("start", "Начать"),
             ("menu", "Главное меню"),
@@ -147,7 +147,9 @@ async def run(args, settings):
                 async def print_message(chat, text):
                     print(text)
 
-                runtime.schedule = DailySchedule(settings, runtime.checks, print_message)
+                runtime.schedule = DailySchedule(
+                    settings, runtime.checks, print_message, runtime.agent
+                )
                 await runtime.schedule.run()
             else:
                 ids = (

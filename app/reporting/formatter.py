@@ -95,6 +95,25 @@ def detailed(report: ClientReport) -> str:
             lines.append(f"• {signal.message}")
             if signal.evidence:
                 lines.append(signal.evidence)
+    if report.metrica_current and any(
+        value is not None for value in report.metrica_current.values()
+    ):
+        labels = {
+            "visits": "Визиты сайта",
+            "users": "Посетители сайта",
+            "pageviews": "Просмотры страниц",
+            "bounce_rate": "Отказы, %",
+            "page_depth": "Глубина просмотра",
+            "avg_visit_duration_seconds": "Среднее время на сайте, сек.",
+        }
+        lines += ["", "Поведение на сайте (весь выбранный счётчик):"]
+        for key, label in labels.items():
+            current = report.metrica_current.get(key)
+            previous = report.metrica_previous.get(key)
+            if current is not None:
+                lines.append(
+                    f"{label}: сейчас {fmt(current)}; раньше {fmt(previous)}"
+                )
     if report.goal_metrics and not report.mock:
         goals = report.goal_metrics
         active = [

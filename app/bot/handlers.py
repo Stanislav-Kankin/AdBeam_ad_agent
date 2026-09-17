@@ -59,7 +59,7 @@ def build_dispatcher(runtime):
             token = progress_state.set(state)
             try:
                 await presentation.start(state)
-                _, text = await runtime.checks.run_check(
+                reports, text = await runtime.checks.run_check(
                     client_ids,
                     make_period(period),
                     mode,
@@ -67,8 +67,20 @@ def build_dispatcher(runtime):
                     chat_id=message.chat.id,
                     user_id=user_id,
                 )
+                if len(client_ids) == 1:
+                    await runtime.checks.repository.save_conversation(
+                        message.chat.id,
+                        user_id,
+                        None,
+                        active_client_id=client_ids[0],
+                        period=reports[0].period.model_dump(mode="json") if reports else None,
+                    )
+                state["stage"] = "формулирую выводы"
+                text, markdown = await runtime.agent.explain_reports(
+                    reports, text, message.chat.id, user_id
+                )
                 state["stage"] = "отправляю результат"
-                await presentation.finish(text)
+                await presentation.finish(text, markdown=markdown)
             finally:
                 await presentation.stop()
                 progress_state.reset(token)
@@ -155,7 +167,7 @@ def build_dispatcher(runtime):
                 k for k, v in pending.items() if v[1:3] == (message.chat.id, message.from_user.id)
             ]:
                 pending.pop(key)
-            runtime.agent.cancel(message.chat.id, message.from_user.id)
+            await runtime.agent.cancel(message.chat.id, message.from_user.id)
             await message.answer(
                 "Выбор отменён, контекст диалога очищен. Уже запущенные проверки продолжатся."
             )

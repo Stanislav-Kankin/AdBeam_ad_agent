@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 class DailySchedule:
-    def __init__(self, settings, checks, send):
-        self.settings, self.checks, self.send = settings, checks, send
+    def __init__(self, settings, checks, send, agent=None):
+        self.settings, self.checks, self.send, self.agent = settings, checks, send, agent
         self.scheduler = AsyncIOScheduler(timezone=MOSCOW)
         self.lock = asyncio.Lock()
 
@@ -107,7 +107,10 @@ class DailySchedule:
                             for cid in ids
                             if cid not in {r.client_id for r in reports}
                         ]
-                        blocks.append(compact(reports, period, failed))
+                        text = compact(reports, period, failed)
+                        if self.agent:
+                            text, _ = await self.agent.explain_reports(reports, text, chat)
+                        blocks.append(text)
                     if self.checks.registry.errors:
                         blocks.append(
                             f"В конфиге пропущено ошибочных записей: {len(self.checks.registry.errors)}. Проверьте журнал запуска."

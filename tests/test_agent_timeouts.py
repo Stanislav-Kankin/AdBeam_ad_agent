@@ -33,10 +33,12 @@ async def test_partial_goal_batches_preserve_completed_totals(client, monkeypatc
         {"goals": [{"id": i, "name": str(i)} for i in range(25)]},
     ]
     adapter = MetricaAdapter(transport)
-    adapter.report = AsyncMock(side_effect=[{"totals": [100] + [7] * 19}, TimeoutError()])
+    adapter.report = AsyncMock(
+        side_effect=[{"totals": [100, 90, 200, 20, 2, 60] + [7] * 14}, TimeoutError()]
+    )
     result = await adapter._overview(client, make_period().current, ["1"], all_goals=True)
     assert result.status == "insufficient"
     assert result.visits == 100
-    assert sum(g["reaches"] == "7" for g in result.goals) == 19
-    assert sum(g["reaches"] is None for g in result.goals) == 6
+    assert sum(g["reaches"] == "7" for g in result.goals) == 14
+    assert sum(g["reaches"] is None for g in result.goals) == 11
     assert result.limitations

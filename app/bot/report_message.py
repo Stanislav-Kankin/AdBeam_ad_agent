@@ -7,6 +7,7 @@ from time import monotonic
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import MessageEntity
 
+from app.bot.markdown import markdown_parts
 from app.reporting.formatter import METRIC_NAMES, split_message
 
 logger = logging.getLogger(__name__)
@@ -20,12 +21,23 @@ def report_entities(text):
         content = line.rstrip("\r\n")
         if (
             any(content.startswith(label + ":") for label in METRIC_NAMES.values())
+            or content.startswith(
+                (
+                    "Визиты сайта:",
+                    "Посетители сайта:",
+                    "Просмотры страниц:",
+                    "Отказы, %:",
+                    "Глубина просмотра:",
+                    "Среднее время на сайте, сек.:",
+                )
+            )
             or content.startswith(("📊 AdBeam", "🧪 MOCK", "🔴 ", "🟡 ", "🟢 ", "⚪ "))
             or content
             in (
                 "Ключевые показатели:",
                 "Что известно:",
                 "Цели Метрики:",
+                "Поведение на сайте (весь выбранный счётчик):",
                 "Следующий шаг:",
                 "Ограничения анализа:",
                 "Источники данных:",
@@ -85,26 +97,30 @@ class ReportMessage:
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
 
-    async def finish(self, text):
+    async def finish(self, text, *, markdown=False):
         # Stop and await animation before editing: late progress cannot overwrite the report.
         await self.stop()
-        parts = split_message(text)
+        parts = (
+            list(markdown_parts(text))
+            if markdown
+            else [(part, report_entities(part)) for part in split_message(text)]
+        )
         if not parts:
             return
         if self.status:
             try:
                 await retry_telegram(
                     lambda: self.status.edit_text(
-                        parts[0], parse_mode=None, entities=report_entities(parts[0])
+                        parts[0][0], parse_mode=None, entities=parts[0][1]
                     )
                 )
                 parts = parts[1:]
             except TelegramBadRequest:
                 # The user may have deleted the progress message.
                 logger.info("Progress message could not be edited; sending report separately")
-        for part in parts:
+        for part, entities in parts:
             await retry_telegram(
-                lambda part=part: self.message.answer(
-                    part, parse_mode=None, entities=report_entities(part)
+                lambda part=part, entities=entities: self.message.answer(
+                    part, parse_mode=None, entities=entities
                 )
             )

@@ -133,10 +133,10 @@ async def test_ambiguity_and_cancel(runtime):
     assert len(runtime.registry.resolve(123456789, "Николай")) == 2
     answer = await runtime.agent.ask("Проверь Николая", 123456789, 1)
     assert "Какого клиента" in answer
-    assert (123456789, 1) in runtime.agent.history
-    assert (123456789, 2) not in runtime.agent.history
-    runtime.agent.cancel(123456789, 1)
-    assert not runtime.agent.history
+    assert (await runtime.checks.repository.conversation(123456789, 1))["messages"]
+    assert not (await runtime.checks.repository.conversation(123456789, 2))["messages"]
+    await runtime.agent.cancel(123456789, 1)
+    assert not (await runtime.checks.repository.conversation(123456789, 1))["messages"]
 
 
 def test_redaction_preserves_dates_and_decimal_values(monkeypatch):

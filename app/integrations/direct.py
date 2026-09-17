@@ -20,6 +20,8 @@ DIMENSIONS = {
     "search": ("SEARCH_QUERY_PERFORMANCE_REPORT", ["Query"]),
     "placement": ("CUSTOM_REPORT", ["Placement"]),
 }
+REPORT_PAGE_SIZE = 10000
+REPORT_MAX_PAGES = 100
 
 
 def parse_tsv(text: str, goals: list[str], attribution: str, fields: list[str]):
@@ -83,7 +85,6 @@ class DirectAdapter:
             "IncludeVAT": "NO",
             "IncludeDiscount": "NO",
             "OrderBy": [{"Field": "Cost", "SortOrder": "DESCENDING"}],
-            "Page": {"Limit": 10000},
         }
         if client.direct.main_goal_ids:
             params.update(
@@ -95,22 +96,38 @@ class DirectAdapter:
             params["SelectionCriteria"]["Filter"] = [
                 {"Field": "AdNetworkType", "Operator": "EQUALS", "Values": ["AD_NETWORK"]}
             ]
-        params["ReportName"] = (
-            "adbeam_" + hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:24]
-        )
-        async with self.report_lock:
-            response = await self.transport.request(
-                "direct",
-                "POST",
-                REPORTS_URL,
-                pending=True,
-                headers=self.headers(client),
-                json={"params": params},
+        rows, limited = [], False
+        for page in range(REPORT_MAX_PAGES):
+            page_params = {
+                **params,
+                "Page": {"Limit": REPORT_PAGE_SIZE, "Offset": page * REPORT_PAGE_SIZE},
+            }
+            page_params["ReportName"] = (
+                "adbeam_"
+                + hashlib.sha256(
+                    json.dumps(page_params, sort_keys=True).encode()
+                ).hexdigest()[:24]
             )
-        rows = parse_tsv(
-            response.text, client.direct.main_goal_ids, client.direct.attribution_model, fields
-        )
-        limited = len(rows) >= 10000
+            async with self.report_lock:
+                response = await self.transport.request(
+                    "direct",
+                    "POST",
+                    REPORTS_URL,
+                    pending=True,
+                    headers=self.headers(client),
+                    json={"params": page_params},
+                )
+            batch = parse_tsv(
+                response.text,
+                client.direct.main_goal_ids,
+                client.direct.attribution_model,
+                fields,
+            )
+            rows.extend(batch)
+            if len(batch) < REPORT_PAGE_SIZE:
+                break
+        else:
+            limited = True
         return DirectData(
             status=DataStatus.INSUFFICIENT
             if limited
@@ -120,7 +137,9 @@ class DirectAdapter:
             period=period,
             rows=rows,
             totals=aggregate([r.totals for r in rows]),
-            limitations=["Достигнут лимит 10000 строк; итоги неполные."] if limited else [],
+            limitations=["Достигнут защитный лимит 1 000 000 строк; итоги неполные."]
+            if limited
+            else [],
         )
 
     async def campaigns(self, client):

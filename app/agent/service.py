@@ -18,11 +18,10 @@ class AgentService:
     def __init__(self, checks, llm=None, daily_limit=None):
         self.checks, self.llm = checks, llm
         self.tools = ToolRegistry(checks)
-        self.history = {}
         self.daily_limit = daily_limit
 
-    def cancel(self, chat_id, user_id):
-        self.history.pop((chat_id, user_id), None)
+    async def cancel(self, chat_id, user_id):
+        await self.checks.repository.clear_conversation(chat_id, user_id)
 
     async def ask(self, text, chat_id, user_id):
         if chat_id not in self.checks.registry.allowed_chats:
@@ -37,20 +36,28 @@ class AgentService:
                 user_id=user_id,
             )
         request_id, start = str(uuid4()), monotonic()
-        key = (chat_id, user_id)
-        # Drop old conversations and bound memory by both sessions and message length.
-        self.history = {k: v for k, v in self.history.items() if monotonic() - v[0] < 1800}
-        if len(self.history) >= 200:
-            self.history.pop(min(self.history, key=lambda k: self.history[k][0]))
-        old = self.history.get(key, (0, []))[1]
+        context = await self.checks.repository.conversation(chat_id, user_id)
+        old = context["messages"]
         system = files("app.agent").joinpath("system_prompt.txt").read_text(encoding="utf-8")
         system += f"\nСегодня по Москве: {today_moscow()}. Режим: {'MOCK, синтетические данные' if self.checks.provider.mock else 'production'}."
+        active_id = context.get("active_client_id")
+        if active_id:
+            try:
+                active = self.checks.registry.require(chat_id, active_id)
+                system += f"\nТекущий контекст беседы: клиент {active.name}, ID {active.id}."
+            except PermissionError:
+                active_id = None
+        if context.get("period"):
+            system += "\nПоследний использованный период: " + json.dumps(
+                context["period"], ensure_ascii=False
+            )
         messages = [
             {"role": "system", "content": system},
             *old[-6:],
             {"role": "user", "content": redact(text)[:4000]},
         ]
         count, evidence = 0, []
+        active_period = context.get("period")
         phase = "llm"
         analytics_started = False
         try:
@@ -80,13 +87,16 @@ class AgentService:
                         )
                         if self.checks.provider.mock:
                             answer = "🧪 MOCK — тестовые данные\n" + answer
-                        self.history[key] = (
-                            monotonic(),
+                        await self.checks.repository.save_conversation(
+                            chat_id,
+                            user_id,
                             [
                                 *old[-4:],
                                 {"role": "user", "content": redact(text)[:2000]},
                                 {"role": "assistant", "content": answer[:4000]},
                             ],
+                            active_client_id=active_id,
+                            period=active_period,
                         )
                         return answer
                     if count + len(reply.calls) > 8:
@@ -107,6 +117,10 @@ class AgentService:
                             user_id=user_id,
                         )
                         evidence.append(result)
+                        if result.get("client_id"):
+                            active_id = result["client_id"]
+                        if result.get("period"):
+                            active_period = result["period"]
                         messages.append(
                             {
                                 "role": "tool",
@@ -148,6 +162,55 @@ class AgentService:
                 )
             return await self.deterministic_fallback(text, chat_id, message, user_id=user_id)
 
+    async def explain_reports(self, reports, deterministic_text, chat_id, user_id=None):
+        """Use the model as an editor over backend-calculated facts, never as a calculator."""
+        if not self.llm or not reports:
+            return deterministic_text, False
+        request_id = str(uuid4())
+        if (
+            self.daily_limit is not None
+            and not await self.checks.repository.reserve_model_call(
+                chat_id, user_id, request_id, self.daily_limit
+            )
+        ):
+            return deterministic_text, False
+        system = (
+            "Ты редактор аналитического отчёта AdBeam. Используй только факты и числа из "
+            "переданного готового отчёта. Не пересчитывай показатели, не добавляй причины как "
+            "факты и не скрывай ограничения данных. Начни с понятного вывода. Затем выведи "
+            "период, источники, ключевые показатели по одному на строку, изменения, гипотезы, "
+            "рекомендации, ограничения и следующий шаг. Названия показателей и значения выделяй "
+            "Markdown-жирным. Не используй Markdown-таблицы."
+        )
+        prompt = "Готовый отчёт backend:\n\n" + deterministic_text
+        try:
+            async with asyncio.timeout(45):
+                reply = await self.llm.complete(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt[:60000]},
+                    ],
+                    [],
+                )
+            if reply.calls or not reply.content.strip():
+                return deterministic_text, False
+            answer = redact(reply.content.strip())
+            active_client_id = reports[0].client_id if len(reports) == 1 else None
+            await self.checks.repository.save_conversation(
+                chat_id,
+                user_id,
+                [
+                    {"role": "user", "content": "Подготовь аналитический отчёт."},
+                    {"role": "assistant", "content": answer[:4000]},
+                ],
+                active_client_id=active_client_id,
+                period=reports[0].period.model_dump(mode="json") if reports else None,
+            )
+            return answer, True
+        except Exception as exc:
+            logger.warning("Report narration failed error=%s", type(exc).__name__)
+            return deterministic_text, False
+
     async def deterministic_fallback(self, text, chat_id, message, *, user_id=None):
         question = text.casefold()
         clients = self.checks.registry.visible(chat_id)
@@ -162,6 +225,14 @@ class AgentService:
         all_clients = any(v in question for v in ("всем клиентам", "всех клиентов", "все клиенты"))
         if all_clients:
             selected = clients
+        if not selected:
+            context = await self.checks.repository.conversation(chat_id, user_id)
+            active_id = context.get("active_client_id")
+            if active_id:
+                try:
+                    selected = [self.checks.registry.require(chat_id, active_id)]
+                except PermissionError:
+                    selected = []
         if not selected or len(selected) > 1 and not all_clients:
             return (
                 message
@@ -195,7 +266,7 @@ class AgentService:
         match = re.search(r"\b(\d{1,3})\s*(?:d\b|дн|дней)", question)
         period_name = f"{match[1]}d" if match else "yesterday" if "вчера" in question else "7d"
         try:
-            _, report = await self.checks.run_check(
+            reports, report = await self.checks.run_check(
                 [c.id for c in selected],
                 make_period(period_name),
                 CheckMode.STANDARD,
@@ -203,6 +274,20 @@ class AgentService:
                 chat_id=chat_id,
                 user_id=user_id,
             )
+            if len(selected) == 1:
+                await self.checks.repository.save_conversation(
+                    chat_id,
+                    user_id,
+                    [
+                        *(
+                            await self.checks.repository.conversation(chat_id, user_id)
+                        )["messages"][-4:],
+                        {"role": "user", "content": redact(text)[:2000]},
+                        {"role": "assistant", "content": report[:4000]},
+                    ],
+                    active_client_id=selected[0].id,
+                    period=reports[0].period.model_dump(mode="json") if reports else None,
+                )
             return message + "\nДетерминированная стандартная проверка:\n\n" + report
         except Exception:
             return message + "\nНе удалось завершить проверку. Используйте /check <клиент> позже."
