@@ -91,7 +91,11 @@ def install_menu(router, runtime, launch):
                     page=page,
                     mode=CheckMode.SUMMARY,
                 )
-                if client_id and runtime.inventory and user in runtime.settings.telegram_admin_user_ids:
+                if (
+                    client_id
+                    and runtime.inventory
+                    and user in runtime.settings.telegram_admin_user_ids
+                ):
                     row("⚙️ Данные и цели", "data", client_id=client_id, page=page)
             else:
                 text += "\nВыберите период завершённых дней (МСК)."
@@ -138,7 +142,15 @@ def install_menu(router, runtime, launch):
             )
             text += f"\nСтраница {page + 1} из {pages}\n✅ выбран · 🔗 связан · ⛔ нет доступа"
             for counter in counters[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]:
-                marker = "✅" if counter["selected"] else "⛔" if counter["status"] != "ok" else "🔗" if counter["linked"] else "▫️"
+                marker = (
+                    "✅"
+                    if counter["selected"]
+                    else "⛔"
+                    if counter["status"] != "ok"
+                    else "🔗"
+                    if counter["linked"]
+                    else "▫️"
+                )
                 label = f"{marker} {counter['name'] or counter['site'] or counter['id']} · {counter['id']}"
                 row(
                     label[:100],
@@ -205,7 +217,11 @@ def install_menu(router, runtime, launch):
                 text += "\nКаталог целей ещё не загружен. Обновите доступы."
             for goal in ordered[page * GOAL_PAGE_SIZE : (page + 1) * GOAL_PAGE_SIZE]:
                 row(
-                    (("✅ " if goal["id"] in selected else "▫️ ") + goal["name"] + f" · {goal['id']}")[:100],
+                    (
+                        ("✅ " if goal["id"] in selected else "▫️ ")
+                        + goal["name"]
+                        + f" · {goal['id']}"
+                    )[:100],
                     "toggle_goal",
                     client_id=client_id,
                     goal_id=goal["id"],
@@ -215,9 +231,7 @@ def install_menu(router, runtime, launch):
             if page:
                 navigation.append(button("← Назад", "goals", client_id=client_id, page=page - 1))
             if page + 1 < pages:
-                navigation.append(
-                    button("Вперёд →", "goals", client_id=client_id, page=page + 1)
-                )
+                navigation.append(button("Вперёд →", "goals", client_id=client_id, page=page + 1))
             if navigation:
                 rows.append(navigation)
             row("← Настройка данных", "data", client_id=client_id)

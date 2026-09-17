@@ -111,9 +111,7 @@ def detailed(report: ClientReport) -> str:
             current = report.metrica_current.get(key)
             previous = report.metrica_previous.get(key)
             if current is not None:
-                lines.append(
-                    f"{label}: сейчас {fmt(current)}; раньше {fmt(previous)}"
-                )
+                lines.append(f"{label}: сейчас {fmt(current)}; раньше {fmt(previous)}")
     if report.goal_metrics and not report.mock:
         goals = report.goal_metrics
         active = [

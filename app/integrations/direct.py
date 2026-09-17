@@ -77,9 +77,7 @@ class DirectAdapter:
             "skipColumnHeader": "false",
         }
 
-    async def breakdown(
-        self, client, period, dimension="campaign", *, max_pages=REPORT_MAX_PAGES
-    ):
+    async def breakdown(self, client, period, dimension="campaign", *, max_pages=REPORT_MAX_PAGES):
         report_type, fields = DIMENSIONS[dimension]
         params = {
             "SelectionCriteria": {"DateFrom": str(period.start), "DateTo": str(period.end)},
@@ -116,9 +114,7 @@ class DirectAdapter:
             }
             page_params["ReportName"] = (
                 "adbeam_"
-                + hashlib.sha256(
-                    json.dumps(page_params, sort_keys=True).encode()
-                ).hexdigest()[:24]
+                + hashlib.sha256(json.dumps(page_params, sort_keys=True).encode()).hexdigest()[:24]
             )
             async with self.report_lock:
                 response = await self.transport.request(

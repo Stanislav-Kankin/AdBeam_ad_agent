@@ -150,10 +150,7 @@ class MetricaInventory:
         )
         if before - set(selected):
             remaining_goals = {
-                goal["id"]
-                for row in catalog
-                if row["id"] in selected
-                for goal in row["goals"]
+                goal["id"] for row in catalog if row["id"] in selected for goal in row["goals"]
             }
             goals = [goal for goal in updated.metrica.main_goal_ids if goal in remaining_goals]
             updated = await self.repository.save_client_preferences(

@@ -88,9 +88,7 @@ class MetricaAdapter:
         configured = client.metrica.selected_counter_ids()
         if len(configured) == 1:
             scoped = client.model_copy(
-                update={
-                    "metrica": client.metrica.model_copy(update={"counter_id": configured[0]})
-                }
+                update={"metrica": client.metrica.model_copy(update={"counter_id": configured[0]})}
             )
             return await self._overview(
                 scoped,
@@ -212,8 +210,7 @@ class MetricaAdapter:
                 "name": redact(str(g.get("name", gid)))[:150],
                 "primary": gid in present,
                 "reaches": str(values[queried.index(gid) + len(base_metrics)])
-                if gid in queried
-                and values[queried.index(gid) + len(base_metrics)] is not None
+                if gid in queried and values[queried.index(gid) + len(base_metrics)] is not None
                 else None,
                 "counter_id": client.metrica.counter_id,
                 "type": g.get("type", ""),

@@ -159,8 +159,12 @@ class Repository:
             row = await session.get(DailySnapshot, key)
             if row is None:
                 row = DailySnapshot(
-                    app_mode=key[0], client_id=key[1], day=key[2], quality=key[3],
-                    payload={}, refresh_after=captured,
+                    app_mode=key[0],
+                    client_id=key[1],
+                    day=key[2],
+                    quality=key[3],
+                    payload={},
+                    refresh_after=captured,
                 )
                 session.add(row)
             row.payload = safe_json(snapshot.model_dump(mode="json"))
@@ -221,17 +225,14 @@ class Repository:
                 session.add(row)
             row.payload = safe_json(snapshot.model_dump(mode="json"))
             row.complete = all(
-                value.value == "ok"
-                for value in (snapshot.direct.status, snapshot.metrica.status)
+                value.value == "ok" for value in (snapshot.direct.status, snapshot.metrica.status)
             )
             row.captured_at = now
             row.expires_at = now + timedelta(minutes=ttl_minutes)
 
     async def conversation(self, chat_id, user_id):
         async with self.sessions() as session:
-            row = await session.get(
-                ConversationState, (self.app_mode, str(chat_id), str(user_id))
-            )
+            row = await session.get(ConversationState, (self.app_mode, str(chat_id), str(user_id)))
             if row is None:
                 return {"messages": [], "active_client_id": None, "period": None}
             return {
@@ -391,7 +392,9 @@ class Repository:
                 "permission": row.permission,
                 "status": row.status,
                 "goals": row.goals,
-                "linked": bool(link_by_id.get(row.counter_id) and link_by_id[row.counter_id].linked),
+                "linked": bool(
+                    link_by_id.get(row.counter_id) and link_by_id[row.counter_id].linked
+                ),
                 "selected": bool(
                     link_by_id.get(row.counter_id) and link_by_id[row.counter_id].selected
                 ),

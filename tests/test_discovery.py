@@ -174,8 +174,7 @@ async def test_goal_catalog_does_not_multiply_reports_by_campaign_chunks(client,
                 200,
                 json={
                     "goals": [
-                        {"id": i, "name": f"Goal {i}", "type": "action"}
-                        for i in range(1, 123)
+                        {"id": i, "name": f"Goal {i}", "type": "action"} for i in range(1, 123)
                     ]
                 },
             )

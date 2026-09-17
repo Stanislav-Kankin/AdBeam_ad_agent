@@ -103,10 +103,10 @@ class CheckService:
         result = await self.provider.snapshot(client, period, quick=quick)
         complete = result.direct.status == DataStatus.OK and result.metrica.status == DataStatus.OK
         age_days = (today_moscow() - period.end).days
-        ttl = 10 if not complete else 1440 if age_days > client.targets.conversion_delay_days else 240
-        await self.repository.save_snapshot(
-            client.id, period, result, quick=quick, ttl_minutes=ttl
+        ttl = (
+            10 if not complete else 1440 if age_days > client.targets.conversion_delay_days else 240
         )
+        await self.repository.save_snapshot(client.id, period, result, quick=quick, ttl_minutes=ttl)
         await self.repository.save_daily_snapshot(client.id, period, result, quick=quick)
         return result
 

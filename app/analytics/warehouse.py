@@ -75,9 +75,7 @@ def combine_daily(snapshots: list[Snapshot], period):
             reaches = goal.get("reaches")
             if stored["reaches"] is not None:
                 stored["reaches"] = (
-                    stored["reaches"] + Decimal(str(reaches))
-                    if reaches is not None
-                    else None
+                    stored["reaches"] + Decimal(str(reaches)) if reaches is not None else None
                 )
     for key, goal in goals.items():
         if goal_counts[key] != len(snapshots):

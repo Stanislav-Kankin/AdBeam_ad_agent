@@ -167,11 +167,8 @@ class AgentService:
         if not self.llm or not reports:
             return deterministic_text, False
         request_id = str(uuid4())
-        if (
-            self.daily_limit is not None
-            and not await self.checks.repository.reserve_model_call(
-                chat_id, user_id, request_id, self.daily_limit
-            )
+        if self.daily_limit is not None and not await self.checks.repository.reserve_model_call(
+            chat_id, user_id, request_id, self.daily_limit
         ):
             return deterministic_text, False
         system = (
@@ -279,9 +276,9 @@ class AgentService:
                     chat_id,
                     user_id,
                     [
-                        *(
-                            await self.checks.repository.conversation(chat_id, user_id)
-                        )["messages"][-4:],
+                        *(await self.checks.repository.conversation(chat_id, user_id))["messages"][
+                            -4:
+                        ],
                         {"role": "user", "content": redact(text)[:2000]},
                         {"role": "assistant", "content": report[:4000]},
                     ],

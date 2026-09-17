@@ -19,11 +19,7 @@ async def test_inventory_persists_counter_and_goal_selection(runtime, client, mo
             return httpx.Response(
                 200,
                 json={
-                    "result": {
-                        "Campaigns": [
-                            {"TextCampaign": {"CounterIds": {"Items": [5, 6]}}}
-                        ]
-                    }
+                    "result": {"Campaigns": [{"TextCampaign": {"CounterIds": {"Items": [5, 6]}}}]}
                 },
             )
         if request.url.path == "/management/v1/counters":
@@ -46,9 +42,7 @@ async def test_inventory_persists_counter_and_goal_selection(runtime, client, mo
         raise AssertionError(request.url)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-        service = MetricaInventory(
-            ReadTransport(http), runtime.checks.repository, runtime.registry
-        )
+        service = MetricaInventory(ReadTransport(http), runtime.checks.repository, runtime.registry)
         counters = await service.refresh_client(client, refresh=True)
         assert [(row["id"], row["status"]) for row in counters] == [
             (5, "ok"),
@@ -86,9 +80,7 @@ async def test_inventory_can_select_unlinked_accessible_counter(runtime, client,
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-        service = MetricaInventory(
-            ReadTransport(http), runtime.checks.repository, runtime.registry
-        )
+        service = MetricaInventory(ReadTransport(http), runtime.checks.repository, runtime.registry)
         await service.refresh_client(client, refresh=True)
         configured = await service.select_counters(client, [7], user_id=1)
     assert configured.metrica.selected_counter_ids() == [7]

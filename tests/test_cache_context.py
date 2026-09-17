@@ -80,9 +80,7 @@ async def test_model_edits_ready_report_without_tools(runtime, client):
     llm = AsyncMock()
     llm.complete.return_value = LLMMessage(content="**Расход:** 84 000 ₽\nСледующий шаг.")
     service = AgentService(runtime.checks, llm)
-    text, markdown = await service.explain_reports(
-        [report], "Расход: 84 000 ₽", 123456789, 9
-    )
+    text, markdown = await service.explain_reports([report], "Расход: 84 000 ₽", 123456789, 9)
     assert markdown
     assert text.startswith("**Расход:**")
     assert llm.complete.await_args.args[1] == []
