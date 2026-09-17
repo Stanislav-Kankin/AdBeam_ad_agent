@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 from importlib.resources import files
 from time import monotonic
@@ -9,6 +10,8 @@ from app.agent.tools import ToolRegistry, tool_schemas
 from app.analytics.periods import make_period, today_moscow
 from app.domain.reports import CheckMode, TriggerSource
 from app.security import redact
+
+logger = logging.getLogger(__name__)
 
 
 class AgentService:
@@ -23,6 +26,8 @@ class AgentService:
     async def ask(self, text, chat_id, user_id):
         if chat_id not in self.checks.registry.allowed_chats:
             raise PermissionError("Чат не разрешён.")
+        if text.strip().casefold().rstrip(".!\\ ") in ("проверка связи", "пинг", "ping"):
+            return "На связи. Выберите клиента в /menu или напишите, какой отчёт нужен."
         if not self.llm:
             return await self.deterministic_fallback(
                 text,
@@ -44,10 +49,18 @@ class AgentService:
             {"role": "user", "content": redact(text)[:4000]},
         ]
         count, evidence = 0, []
+        phase = "llm"
+        analytics_started = False
         try:
             async with asyncio.timeout(240):
                 while count <= 8:
-                    reply = await self.llm.complete(messages, tool_schemas())
+                    phase = "llm"
+                    logger.info("Agent model started request=%s", request_id)
+                    async with asyncio.timeout(45):
+                        reply = await self.llm.complete(messages, tool_schemas())
+                    logger.info(
+                        "Agent model finished request=%s calls=%s", request_id, len(reply.calls)
+                    )
                     if not reply.calls:
                         answer = (
                             redact(reply.content)
@@ -72,6 +85,8 @@ class AgentService:
                     messages.append(reply.as_dict())
                     for call in reply.calls:
                         count += 1
+                        phase = "tool"
+                        analytics_started |= call.name != "list_clients"
                         result = await self.tools.call(
                             call.name, call.arguments, chat_id=chat_id, request_id=request_id
                         )
@@ -84,7 +99,14 @@ class AgentService:
                             }
                         )
                 return self.fallback(evidence, "Достигнут лимит инструментов.")
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Agent stopped request=%s phase=%s error=%s elapsed=%.1fs",
+                request_id,
+                phase,
+                type(exc).__name__,
+                monotonic() - start,
+            )
             await self.checks.repository.tool_event(
                 request_id=request_id,
                 chat_id=str(chat_id),
@@ -92,12 +114,21 @@ class AgentService:
                 client_id=None,
                 arguments={},
                 status="error",
-                error="LLM unavailable",
+                error=f"{phase}: {type(exc).__name__}",
                 duration_seconds=monotonic() - start,
             )
-            message = "DeepSeek недоступен. Обычные отчёты /check и /summary продолжают работать."
+            message = (
+                "Сбор данных не завершился в отведённое время. Повторная проверка автоматически не запускается."
+                if phase == "tool"
+                else "DeepSeek недоступен или не ответил вовремя. Показываю доступный результат без комментария модели."
+            )
             if any(result.get("reports") for result in evidence):
                 return self.fallback(evidence, message)
+            if analytics_started:
+                return (
+                    message
+                    + "\nГотового отчёта нет. Используйте /summary <клиент> для краткой проверки."
+                )
             return await self.deterministic_fallback(text, chat_id, message)
 
     async def deterministic_fallback(self, text, chat_id, message):

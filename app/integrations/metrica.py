@@ -1,3 +1,6 @@
+import asyncio
+from time import monotonic
+
 from app.config import secret_from_env
 from app.domain.reports import DataStatus, MetricaData, RevenueData
 from app.integrations.discovery import campaign_counters
@@ -72,9 +75,10 @@ class MetricaAdapter:
             raise IntegrationError("metrica", "missing_metrics")
         return data
 
-    async def overview(self, client, period, campaign_ids):
+    async def overview(self, client, period, campaign_ids, *, budget=165):
+        deadline = monotonic() + budget
         if client.metrica.counter_id is not None:
-            return await self._overview(client, period, campaign_ids)
+            return await self._overview(client, period, campaign_ids, deadline=deadline)
         counters = await campaign_counters(self.transport, client)
         if not counters:
             return MetricaData(
@@ -84,12 +88,20 @@ class MetricaAdapter:
             )
         reports, limitations = [], []
         for counter_id in counters:
+            if monotonic() >= deadline:
+                limitations.append(
+                    "Время загрузки Метрики исчерпано; остальные счётчики не проверены."
+                )
+                break
             scoped = client.model_copy(
                 update={"metrica": client.metrica.model_copy(update={"counter_id": counter_id})}
             )
             try:
-                report = await self._overview(scoped, period, campaign_ids, all_goals=True)
+                report = await self._overview(
+                    scoped, period, campaign_ids, all_goals=True, deadline=deadline
+                )
                 reports.append(report)
+                limitations.extend(f"Счётчик {counter_id}: {v}" for v in report.limitations)
             except IntegrationError as exc:
                 limitations.append(f"Счётчик {counter_id}: {exc}")
                 if exc.code == "quota_cooldown_429":
@@ -116,7 +128,7 @@ class MetricaAdapter:
             limitations=limitations,
         )
 
-    async def _overview(self, client, period, campaign_ids, all_goals=False):
+    async def _overview(self, client, period, campaign_ids, all_goals=False, deadline=None):
         path = f"/management/v1/counter/{client.metrica.counter_id}"
         info = await self.transport.json(
             "metrica", "GET", BASE_URL + path, headers=self.headers(client)
@@ -134,19 +146,33 @@ class MetricaAdapter:
         missing = [g for g in client.metrica.main_goal_ids if g not in available]
         present = [g for g in client.metrica.main_goal_ids if g in available]
         queried = list(available) if all_goals else present
-        report = await self.report(
-            client,
-            period,
-            campaign_ids,
-            ["ym:s:visits", *[f"ym:s:goal{g}reaches" for g in queried]],
-        )
-        values = [number(v) for v in report["totals"]]
+        # Commit only complete metric batches across the entire campaign scope.
+        # Interrupted batches must not appear as zero or as complete totals.
+        metrics = ["ym:s:visits", *[f"ym:s:goal{g}reaches" for g in queried]]
+        values = [None] * len(metrics)
+        sampled, limitations = False, []
+        for start in range(0, len(metrics), 20):
+            try:
+                async with asyncio.timeout(max(0, deadline - monotonic()) if deadline else None):
+                    report = await self.report(
+                        client, period, campaign_ids, metrics[start : start + 20]
+                    )
+                values[start : start + 20] = [number(v) for v in report["totals"]]
+                sampled |= bool(report.get("sampled"))
+            except (TimeoutError, IntegrationError) as exc:
+                limitations.append(
+                    "Загрузка целей завершена частично: незагруженные цели не считаются нулевыми. "
+                    + (str(exc) if isinstance(exc, IntegrationError) else "Истекло время загрузки.")
+                )
+                break
         goals = [
             {
                 "id": gid,
                 "name": redact(str(g.get("name", gid)))[:150],
                 "primary": gid in present,
-                "reaches": str(values[queried.index(gid) + 1]) if gid in queried else None,
+                "reaches": str(values[queried.index(gid) + 1])
+                if gid in queried and values[queried.index(gid) + 1] is not None
+                else None,
                 "counter_id": client.metrica.counter_id,
                 "type": g.get("type", ""),
             }
@@ -154,15 +180,16 @@ class MetricaAdapter:
         ]
         return MetricaData(
             status=DataStatus.INSUFFICIENT
-            if missing or report.get("sampled")
+            if missing or sampled or limitations
             else DataStatus.OK
             if values[0]
             else DataStatus.EMPTY,
             period=period,
-            visits=int(values[0]),
+            visits=int(values[0]) if values[0] is not None else None,
             goals=goals,
             missing_goal_ids=missing,
-            sampled=bool(report.get("sampled")),
+            sampled=sampled,
+            limitations=limitations,
             timezone=zone,
         )
 

@@ -57,7 +57,9 @@ class ProductionProvider:
             try:
                 stage(f"{client.name}: загружаю Метрику и цели")
                 async with asyncio.timeout(45 if quick else 180):
-                    return await self.metrica.overview(client, period, ids)
+                    return await self.metrica.overview(
+                        client, period, ids, budget=35 if quick else 165
+                    )
             except TimeoutError:
                 logger.warning("Metrica deadline exceeded client=%s quick=%s", client.id, quick)
                 return MetricaData(

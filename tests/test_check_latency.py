@@ -53,7 +53,7 @@ async def test_metrica_timeout_preserves_direct(client, monkeypatch):
     )
     metrica = AsyncMock()
 
-    async def stall(*args):
+    async def stall(*args, **kwargs):
         await asyncio.Future()
 
     metrica.overview.side_effect = stall
