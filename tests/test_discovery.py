@@ -160,3 +160,45 @@ async def test_auto_counters_keep_all_goals_separate(client, monkeypatch):
         (5, "42", "7"),
         (6, "42", "7"),
     ]
+
+
+async def test_goal_catalog_does_not_multiply_reports_by_campaign_chunks(client, monkeypatch):
+    monkeypatch.setenv("METRICA_OAUTH_TOKEN", "synthetic")
+    client.metrica.counter_id = 5
+    period = make_period("7d").current
+    stat_calls = []
+
+    def respond(request):
+        if request.url.path.endswith("/goals"):
+            return httpx.Response(
+                200,
+                json={
+                    "goals": [
+                        {"id": i, "name": f"Goal {i}", "type": "action"}
+                        for i in range(1, 123)
+                    ]
+                },
+            )
+        if "/management/" in request.url.path:
+            return httpx.Response(200, json={"counter": {"time_zone_name": "Europe/Moscow"}})
+        stat_calls.append(request)
+        assert "filters" not in request.url.params
+        metrics = request.url.params["metrics"].split(",")
+        return httpx.Response(
+            200,
+            json={
+                "query": {"date1": str(period.start), "date2": str(period.end)},
+                "totals": [1] * len(metrics),
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        result = await MetricaAdapter(ReadTransport(http))._overview(
+            client,
+            period,
+            [str(i) for i in range(2169)],
+            all_goals=True,
+        )
+    assert result.scope == "counter"
+    assert len(stat_calls) == 7
+    assert len(result.goals) == 122

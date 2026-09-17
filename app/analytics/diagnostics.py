@@ -290,6 +290,7 @@ class CheckService:
                 },
                 limitations=list(dict.fromkeys(limitations)),
                 main_goal_ids=client.metrica.main_goal_ids,
+                goal_scope=current.metrica.scope,
                 goal_metrics=[
                     {
                         **g,

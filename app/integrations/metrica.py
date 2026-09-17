@@ -27,15 +27,20 @@ class MetricaAdapter:
         return {"Authorization": f"OAuth {token}"}
 
     async def report(self, client, period, campaign_ids, metrics):
-        if len(campaign_ids) > 100 or len(metrics) > 20:
+        if (campaign_ids is not None and len(campaign_ids) > 100) or len(metrics) > 20:
             totals = [number(0) for _ in metrics]
             sampled = False
-            for offset in range(0, len(campaign_ids), 100):
+            campaign_chunks = (
+                [campaign_ids[offset : offset + 100] for offset in range(0, len(campaign_ids), 100)]
+                if campaign_ids is not None
+                else [None]
+            )
+            for campaign_chunk in campaign_chunks:
                 for start in range(0, len(metrics), 20):
                     data = await self.report(
                         client,
                         period,
-                        campaign_ids[offset : offset + 100],
+                        campaign_chunk,
                         metrics[start : start + 20],
                     )
                     sampled |= bool(data.get("sampled"))
@@ -45,9 +50,9 @@ class MetricaAdapter:
         return await self._report(client, period, campaign_ids, metrics)
 
     async def _report(self, client, period, campaign_ids, metrics):
-        if not campaign_ids or len(campaign_ids) > 100:
+        if campaign_ids is not None and (not campaign_ids or len(campaign_ids) > 100):
             raise IntegrationError("metrica", "campaign_scope_missing_or_too_large")
-        if any(not str(v).isdigit() for v in campaign_ids):
+        if campaign_ids is not None and any(not str(v).isdigit() for v in campaign_ids):
             raise IntegrationError("metrica", "invalid_campaign_scope")
         attribution = ATTRIBUTIONS[client.direct.attribution_model]
         params = {
@@ -57,10 +62,13 @@ class MetricaAdapter:
             "metrics": ",".join(metrics),
             "accuracy": "full",
             "limit": 1,
-            "filters": f"ym:s:{attribution}DirectClickOrder=.("
-            + ",".join(str(v) for v in campaign_ids)
-            + ")",
         }
+        if campaign_ids is not None:
+            params["filters"] = (
+                f"ym:s:{attribution}DirectClickOrder=.("
+                + ",".join(str(v) for v in campaign_ids)
+                + ")"
+            )
         data = await self.transport.json(
             "metrica",
             "GET",
@@ -154,9 +162,11 @@ class MetricaAdapter:
         for start in range(0, len(metrics), 20):
             try:
                 async with asyncio.timeout(max(0, deadline - monotonic()) if deadline else None):
-                    report = await self.report(
-                        client, period, campaign_ids, metrics[start : start + 20]
-                    )
+                    # Goal totals describe the selected counter as a whole. Filtering every
+                    # metric batch by thousands of campaign IDs multiplies requests and can
+                    # exceed Metrica's report quota before one counter is complete. Direct
+                    # conversions remain scoped to the account in Direct Reports.
+                    report = await self.report(client, period, None, metrics[start : start + 20])
                 values[start : start + 20] = [number(v) for v in report["totals"]]
                 sampled |= bool(report.get("sampled"))
             except (TimeoutError, IntegrationError) as exc:
@@ -189,6 +199,7 @@ class MetricaAdapter:
             goals=goals,
             missing_goal_ids=missing,
             sampled=sampled,
+            scope="counter",
             limitations=limitations,
             timezone=zone,
         )

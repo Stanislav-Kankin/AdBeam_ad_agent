@@ -15,7 +15,7 @@ async def test_empty_report_explains_scope_without_zero_goal_dump(runtime, clien
     text = detailed(report)
     assert "Директ ответил, но не вернул строк статистики" in text
     assert "По 95 — ноль достижений" in text
-    assert "не все обращения на сайте" in text
+    assert "все достижения на выбранном счётчике" in text
     assert "Цель 94" not in text
     assert "сейчас не рассчитано" not in text
     assert "Если статистика есть" in text

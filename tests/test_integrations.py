@@ -126,7 +126,7 @@ def metrica_handler(period, *, sampled=False, timezone="Europe/Moscow", missing=
         if request.url.path.startswith("/management/"):
             return httpx.Response(200, json={"counter": {"time_zone_name": timezone}})
         query = request.url.params
-        assert query["filters"] == "ym:s:lastDirectClickOrder=.(101,102)"
+        assert "filters" not in query
         assert query["accuracy"] == "full"
         metrics = query["metrics"].split(",")
         return httpx.Response(
@@ -149,7 +149,7 @@ def metrica_handler(period, *, sampled=False, timezone="Europe/Moscow", missing=
         (False, True, DataStatus.INSUFFICIENT),
     ],
 )
-async def test_metrica_scoped_goals_sampling(client, monkeypatch, sampled, missing, status):
+async def test_metrica_counter_goals_sampling(client, monkeypatch, sampled, missing, status):
     monkeypatch.setenv("METRICA_OAUTH_TOKEN", "test-token")
     period = make_period().current
     async with httpx.AsyncClient(
@@ -157,6 +157,7 @@ async def test_metrica_scoped_goals_sampling(client, monkeypatch, sampled, missi
     ) as http:
         result = await MetricaAdapter(ReadTransport(http)).overview(client, period, [101, 102])
     assert result.status == status
+    assert result.scope == "counter"
     assert result.visits == 100
     assert result.missing_goal_ids == (["123456"] if missing else [])
 
