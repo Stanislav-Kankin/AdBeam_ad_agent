@@ -286,9 +286,23 @@ async def test_daily_shared_service_and_idempotency_across_restart(runtime):
     assert count > 0
     assert [call.args[1].current.days for call in spy.call_args_list] == [1, 7]
     assert all(call.args[3] == "schedule" for call in spy.call_args_list)
+    digest = "\n".join(call.args[1] for call in send.await_args_list)
+    assert "Ежедневный контроль рекламы" in digest
+    assert "Вчера" in digest and "7 дней" in digest
+    assert "Ежедневная проверка: вчера и последние 7" not in digest
+    assert len(digest) < 4000
     await DailySchedule(runtime.settings, runtime.checks, send).run()
     assert send.await_count == count
     assert spy.await_count == 2
+
+
+async def test_daily_model_gets_one_compact_digest(runtime):
+    send = AsyncMock()
+    agent = AsyncMock()
+    agent.explain_daily_digest.side_effect = lambda text, chat: (text, False)
+    await DailySchedule(runtime.settings, runtime.checks, send, agent).run()
+    agent.explain_daily_digest.assert_awaited_once()
+    assert "Ежедневный контроль рекламы" in agent.explain_daily_digest.await_args.args[0]
 
 
 async def test_failed_delivery_resumes_without_rerunning_analysis(runtime):

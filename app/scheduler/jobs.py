@@ -9,7 +9,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.analytics.periods import MOSCOW, make_period, today_moscow
 from app.domain.reports import CheckMode, TriggerSource
-from app.reporting.formatter import compact, split_message
+from app.reporting.formatter import daily_digest, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ class DailySchedule:
                 if delivery and delivery.status == "sent":
                     return
                 if not delivery:
-                    blocks = ["Ежедневная проверка: вчера и последние 7 завершённых дней."]
+                    results = []
                     for period_name in ("yesterday", "7d"):
                         period = make_period(period_name)
                         reports, _ = await self.checks.run_check(
@@ -132,15 +132,23 @@ class DailySchedule:
                             for cid in ids
                             if cid not in {r.client_id for r in reports}
                         ]
-                        text = compact(reports, period, failed)
-                        if self.agent:
-                            text, _ = await self.agent.explain_reports(reports, text, chat)
-                        blocks.append(text)
-                    if self.checks.registry.errors:
-                        blocks.append(
-                            f"В конфиге пропущено ошибочных записей: {len(self.checks.registry.errors)}. Проверьте журнал запуска."
+                        results.append(
+                            (
+                                "Вчера" if period_name == "yesterday" else "7 дней",
+                                reports,
+                                period,
+                                failed,
+                            )
                         )
-                    await repo.save_delivery(key, parts=split_message("\n\n".join(blocks)))
+                    text = daily_digest(results)
+                    if self.agent:
+                        text, _ = await self.agent.explain_daily_digest(text, chat)
+                    if self.checks.registry.errors:
+                        text += (
+                            f"\n\nВ конфиге пропущено ошибочных записей: "
+                            f"{len(self.checks.registry.errors)}. Проверьте журнал запуска."
+                        )
+                    await repo.save_delivery(key, parts=split_message(text))
                     delivery = await repo.delivery(key)
                 for index in range(delivery.next_part, len(delivery.parts)):
                     await self.send(chat, delivery.parts[index])

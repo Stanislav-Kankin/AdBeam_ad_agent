@@ -208,6 +208,41 @@ class AgentService:
             logger.warning("Report narration failed error=%s", type(exc).__name__)
             return deterministic_text, False
 
+    async def explain_daily_digest(self, deterministic_text, chat_id):
+        """Polish a compact scheduled digest without expanding it into a full report."""
+        if not self.llm:
+            return deterministic_text, False
+        request_id = str(uuid4())
+        if self.daily_limit is not None and not await self.checks.repository.reserve_model_call(
+            chat_id, None, request_id, self.daily_limit
+        ):
+            return deterministic_text, False
+        system = (
+            "Ты выпускающий редактор ежедневного отчёта рекламного агентства. "
+            "Используй только факты из готового дайджеста. Сохрани его коротким: до 2500 знаков. "
+            "Не перечисляй все метрики и все технические ограничения. Не повторяй одну мысль в "
+            "разных разделах. Различай отсутствие рекламной активности и ошибку API. "
+            "Структура: главный вывод; требует внимания; что сделать сегодня; строка о полноте "
+            "данных. Не используй Markdown-таблицы. Названия проектов и ключевые цифры можно "
+            "выделять Markdown-жирным."
+        )
+        try:
+            async with asyncio.timeout(45):
+                reply = await self.llm.complete(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": deterministic_text[:16000]},
+                    ],
+                    [],
+                )
+            answer = redact(reply.content.strip())
+            if reply.calls or not answer or len(answer) > 3500:
+                return deterministic_text, False
+            return answer, True
+        except Exception as exc:
+            logger.warning("Daily narration failed error=%s", type(exc).__name__)
+            return deterministic_text, False
+
     async def deterministic_fallback(self, text, chat_id, message, *, user_id=None):
         question = text.casefold()
         clients = self.checks.registry.visible(chat_id)

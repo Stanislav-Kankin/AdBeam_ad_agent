@@ -99,3 +99,17 @@ async def test_model_editor_failure_returns_deterministic_report(runtime, client
     )
     assert text == "Надёжный отчёт"
     assert not markdown
+
+
+async def test_daily_digest_editor_stays_compact(runtime):
+    from app.agent.service import AgentService
+
+    llm = AsyncMock()
+    llm.complete.return_value = LLMMessage(content="**Главное:** два проекта требуют внимания.")
+    text, markdown = await AgentService(runtime.checks, llm).explain_daily_digest(
+        "📊 Ежедневный контроль рекламы\nДва проекта требуют внимания.", 123456789
+    )
+    assert markdown
+    assert text.startswith("**Главное:**")
+    assert llm.complete.await_args.args[1] == []
+    assert "до 2500 знаков" in llm.complete.await_args.args[0][0]["content"]

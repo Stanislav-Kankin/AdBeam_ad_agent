@@ -33,6 +33,141 @@ def fmt(value):
     return f"{Decimal(value):,.2f}".replace(",", " ").replace(".", ",")
 
 
+def fmt_short(value, *, money=False):
+    if value is None:
+        return "—"
+    number = Decimal(value)
+    decimals = 2 if money or number != number.to_integral() else 0
+    return f"{number:,.{decimals}f}".replace(",", " ").replace(".", ",")
+
+
+def delta_short(report, key):
+    value = report.changes.get(key, {}).get("percent")
+    if value is None:
+        return ""
+    value = Decimal(value)
+    return f" ({'+' if value > 0 else ''}{fmt_short(value, money=True)}%)"
+
+
+def has_signal(report, type_):
+    return any(signal.type == type_ for signal in report.signals)
+
+
+def daily_digest(results):
+    """One operational digest for yesterday and the last seven completed days."""
+    sections = []
+    all_errors = []
+    for title, reports, period, errors in results:
+        active = [report for report in reports if report.current.spend is not None]
+        inactive = [
+            report
+            for report in reports
+            if report.source_status.get("Директ") == "no_data"
+            and has_signal(report, "no_active_campaigns")
+        ]
+        broken = [
+            report for report in reports if report.current.spend is None and report not in inactive
+        ]
+        sections.append((title, reports, period, active, inactive, broken))
+        all_errors.extend(errors or [])
+
+    lines = ["📊 Ежедневный контроль рекламы"]
+    for title, _reports, period, active, inactive, broken in sections:
+        lines.append(
+            f"{title} · {period.current.label()}: работала у {len(active)}, "
+            f"без активности {len(inactive)}, проблема данных {len(broken)}."
+        )
+
+    weekly = sections[-1]
+    _, reports, period, active, inactive, broken = weekly
+    meaningful = {
+        "cpa_high",
+        "cr_drop",
+        "cpc_change",
+        "budget_pacing",
+        "spend_change",
+        "drr_high",
+        "campaign_without_conversions",
+        "device_cr_drop",
+    }
+    attention = [
+        report
+        for report in active
+        if any(signal.type in meaningful for signal in report.signals)
+        or has_signal(report, "campaign_states")
+    ]
+    attention.sort(
+        key=lambda report: (
+            0 if report.level == "red" else 1,
+            -abs(Decimal(report.changes["spend"]["percent"] or 0)),
+            -(report.current.spend or 0),
+        )
+    )
+    lines += ["", f"Главное за 7 дней · сравнение с {period.previous.label()}:"]
+    if attention:
+        for report in attention[:5]:
+            facts = [f"расход {fmt_short(report.current.spend)} ₽{delta_short(report, 'spend')}"]
+            if report.current.cpc is not None:
+                facts.append(
+                    f"CPC {fmt_short(report.current.cpc, money=True)} ₽{delta_short(report, 'cpc')}"
+                )
+            signal = next(
+                (signal.message for signal in report.signals if signal.type in meaningful),
+                "есть кампании не в активном состоянии",
+            )
+            lines.append(
+                f"{ICONS.get(report.level, '🟡')} {report.client_name}: "
+                + "; ".join(facts)
+                + f". {signal}"
+            )
+    elif active:
+        lines.append("🟢 Существенных изменений расхода и стоимости клика не обнаружено.")
+    else:
+        lines.append("Нет проектов с расходом и достаточными данными для сравнения.")
+
+    stable = [report for report in active if report not in attention]
+    if stable:
+        names = ", ".join(report.client_name for report in stable[:6])
+        suffix = f" и ещё {len(stable) - 6}" if len(stable) > 6 else ""
+        lines += ["", f"Без существенных сигналов: {names}{suffix}."]
+    if inactive:
+        names = ", ".join(report.client_name for report in inactive[:6])
+        suffix = f" и ещё {len(inactive) - 6}" if len(inactive) > 6 else ""
+        lines += ["", f"Без рекламной активности: {names}{suffix}."]
+    if broken:
+        names = ", ".join(report.client_name for report in broken[:6])
+        suffix = f" и ещё {len(broken) - 6}" if len(broken) > 6 else ""
+        lines += ["", f"Не удалось получить расход: {names}{suffix}."]
+
+    metrica_issues = [
+        report
+        for report in reports
+        if report.source_status.get("Метрика") not in ("ok", "not_checked")
+    ]
+    missing_goals = [report for report in reports if not report.main_goal_ids]
+    actions = []
+    if attention:
+        actions.append(
+            "Разобрать вклад кампаний у: " + ", ".join(r.client_name for r in attention[:3]) + "."
+        )
+    if metrica_issues:
+        actions.append(f"Проверить доступ или настройку Метрики у {len(metrica_issues)} проектов.")
+    if missing_goals:
+        actions.append(
+            f"Выбрать основные цели у {len(missing_goals)} проектов для расчёта CPA и CR."
+        )
+    if actions:
+        lines += [
+            "",
+            "Что сделать сегодня:",
+            *[f"{i}. {text}" for i, text in enumerate(actions[:3], 1)],
+        ]
+    if all_errors:
+        lines.append(f"Технически не завершены проверки: {len(set(all_errors))}.")
+    lines += ["", "Подробности: /check <клиент> 7d"]
+    return redact("\n".join(lines))
+
+
 def detailed(report: ClientReport) -> str:
     lines = [
         "🧪 MOCK — тестовые данные" if report.mock else "📊 AdBeam Performance Analyst",
