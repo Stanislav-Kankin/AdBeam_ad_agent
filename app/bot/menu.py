@@ -19,7 +19,7 @@ PERIODS = (
 )
 
 
-def install_menu(router, runtime, launch):
+def install_menu(router, runtime, launch, launch_chart):
     actions = {}
 
     def clear(chat, user):
@@ -91,6 +91,10 @@ def install_menu(router, runtime, launch):
                     page=page,
                     mode=CheckMode.SUMMARY,
                 )
+                if client_id:
+                    row(
+                        "📈 График динамики", "period", client_id=client_id, page=page, mode="chart"
+                    )
                 if (
                     client_id
                     and runtime.inventory
@@ -373,7 +377,10 @@ def install_menu(router, runtime, launch):
             ids = [client_id] if client_id else [c.id for c in runtime.registry.visible(chat)]
             await show(callback.message, user, edit=True)
             if ids:
-                await launch(callback.message, user, ids, kwargs["period"], kwargs["mode"])
+                if kwargs["mode"] == "chart":
+                    await launch_chart(callback.message, user, ids[0], kwargs["period"])
+                else:
+                    await launch(callback.message, user, ids, kwargs["period"], kwargs["mode"])
             else:
                 await callback.message.answer("Нет доступных активных клиентов.")
         else:

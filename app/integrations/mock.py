@@ -69,6 +69,19 @@ class MockProvider:
             )
             for i in range(2)
         ]
+        if dimension == "date":
+            return DirectData(
+                status=DataStatus.OK,
+                period=period,
+                rows=[
+                    BreakdownRow(
+                        id=str(period.start + timedelta(days=index)),
+                        name=str(period.start + timedelta(days=index)),
+                        totals=aggregate([row.totals for row in values]),
+                    )
+                    for index, values in enumerate(daily)
+                ],
+            )
         if dimension != "campaign":
             names = {
                 "device": ["DESKTOP", "MOBILE"],

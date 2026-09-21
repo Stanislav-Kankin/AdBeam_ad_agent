@@ -218,6 +218,13 @@ class CheckService:
             )
         return await self.provider.breakdown(client, period, dimension)
 
+    async def dynamics(self, client, period):
+        async with self.semaphore:
+            return await asyncio.gather(
+                self.breakdown(client, period.current, "date"),
+                self.breakdown(client, period.previous, "date"),
+            )
+
     async def analyze(self, client, period, mode):
         logger.info("Check queued client=%s mode=%s", client.id, mode)
         async with self.semaphore:

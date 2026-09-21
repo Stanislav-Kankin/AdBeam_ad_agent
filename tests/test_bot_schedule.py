@@ -7,10 +7,12 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
+    DeleteMessage,
     EditMessageReplyMarkup,
     EditMessageText,
     GetMe,
     SendMessage,
+    SendPhoto,
 )
 from aiogram.types import Chat, Message, Update, User
 
@@ -35,7 +37,9 @@ class FakeTelegram(BaseSession):
             return User(id=555, is_bot=True, first_name="Test", username="adbeam_test_bot")
         if isinstance(method, AnswerCallbackQuery):
             return True
-        if isinstance(method, SendMessage | EditMessageReplyMarkup | EditMessageText):
+        if isinstance(method, DeleteMessage):
+            return True
+        if isinstance(method, SendMessage | SendPhoto | EditMessageReplyMarkup | EditMessageText):
             return Message(
                 message_id=len(self.sent),
                 date=datetime.now(UTC),
@@ -126,6 +130,7 @@ async def test_progress_is_replaced_and_cannot_overwrite_report(monkeypatch):
         '/check "West Экспорт" 14d',
         "/summary_all",
         "/summary grand_line 30d",
+        '/chart "West Экспорт" 14d',
         "/cancel",
         "Почему у West Экспорт вырос CPA?",
     ],
@@ -143,6 +148,8 @@ async def test_telegram_commands_and_free_text_end_to_end(runtime, text):
     assert "не завершилась" not in content and "Не удалось" not in content
     if text.startswith(("/check ", "/check_all")):
         assert "Проверка началась" in content and "MOCK" in content
+    if text.startswith("/chart"):
+        assert any(isinstance(method, SendPhoto) for method in session.sent)
 
 
 async def test_unknown_chats_silent(runtime):

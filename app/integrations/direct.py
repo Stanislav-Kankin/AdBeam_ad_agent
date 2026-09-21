@@ -15,6 +15,7 @@ from app.security import redact
 REPORTS_URL = "https://api.direct.yandex.com/json/v5/reports"
 CAMPAIGNS_URL = "https://api.direct.yandex.com/json/v5/campaigns"
 DIMENSIONS = {
+    "date": ("ACCOUNT_PERFORMANCE_REPORT", ["Date"]),
     "campaign": ("CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId", "CampaignName"]),
     "device": ("CUSTOM_REPORT", ["Device"]),
     "geo": ("CUSTOM_REPORT", ["LocationOfPresenceId"]),

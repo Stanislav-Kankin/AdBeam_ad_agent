@@ -4,8 +4,8 @@ import secrets
 from time import monotonic
 
 from aiogram import Dispatcher, F, Router
-from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.analytics.periods import make_period
 from app.analytics.progress import progress_state
@@ -15,6 +15,7 @@ from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities
 from app.domain.reports import CheckMode, TriggerSource
+from app.reporting.charts import render_dynamics
 from app.reporting.formatter import split_message
 
 
@@ -95,7 +96,64 @@ def build_dispatcher(runtime):
                 "Проверка уже выполняется или все рабочие слоты заняты. Попробуйте чуть позже."
             )
 
-    show_menu, clear_menu = install_menu(router, runtime, launch)
+    async def launch_chart(message, user_id, client_id, period_name):
+        presentation = ReportMessage(message)
+
+        async def work():
+            state = {"stage": "загружаю дневную статистику Директа"}
+            token = progress_state.set(state)
+            try:
+                await presentation.start(state)
+                client = runtime.registry.require(message.chat.id, client_id)
+                period = make_period(period_name)
+                current, previous = await runtime.checks.dynamics(client, period)
+                if any(
+                    result.status.value not in ("ok", "no_data") for result in (current, previous)
+                ):
+                    await presentation.finish(
+                        "График не построен: дневная статистика Директа временно недоступна."
+                    )
+                    return
+                state["stage"] = "рисую график"
+                client_label = f"{client.name} · {client.direct.client_login}"
+                image = await asyncio.to_thread(
+                    render_dynamics, client_label, period, current, previous
+                )
+                await presentation.stop()
+                if presentation.status:
+                    try:
+                        await presentation.status.delete()
+                    except TelegramBadRequest:
+                        pass
+                await message.bot.send_photo(
+                    message.chat.id,
+                    BufferedInputFile(image, filename="adbeam-dynamics.png"),
+                    caption=(
+                        f"📈 {client_label} · {period.current.label()}\n"
+                        f"Сравнение: {period.previous.label()}\n"
+                        "Сплошная линия — текущий период; пунктир — предыдущий. Источник: Директ."
+                    ),
+                )
+                await runtime.checks.repository.save_conversation(
+                    message.chat.id,
+                    user_id,
+                    None,
+                    active_client_id=client.id,
+                    period=period.model_dump(mode="json"),
+                )
+            finally:
+                await presentation.stop()
+                progress_state.reset(token)
+
+        async def failed():
+            await presentation.finish(
+                "Не удалось построить график. Ошибка записана в журнал; попробуйте позже."
+            )
+
+        if not runtime.jobs.start((message.chat.id, user_id), work, failed):
+            await message.answer("Другой запрос уже выполняется или все рабочие слоты заняты.")
+
+    show_menu, clear_menu = install_menu(router, runtime, launch, launch_chart)
 
     async def select_client(message, clients, command):
         expired = [k for k, v in pending.items() if monotonic() - v[0] > 600]
@@ -139,13 +197,16 @@ def build_dispatcher(runtime):
         pending.pop(nonce)
         await callback.answer()
         await callback.message.edit_reply_markup(reply_markup=None)
-        await launch(
-            callback.message,
-            user_id,
-            [client.id],
-            command.period,
-            CheckMode.SUMMARY if command.name == "summary" else CheckMode.STANDARD,
-        )
+        if command.name == "chart":
+            await launch_chart(callback.message, user_id, client.id, command.period)
+        else:
+            await launch(
+                callback.message,
+                user_id,
+                [client.id],
+                command.period,
+                CheckMode.SUMMARY if command.name == "summary" else CheckMode.STANDARD,
+            )
 
     @router.message(F.text.startswith("/"))
     async def command_handler(message):
@@ -176,7 +237,7 @@ def build_dispatcher(runtime):
                 await message.answer("Команда доступна пользователям из TELEGRAM_ADMIN_USER_IDS.")
                 return
             await message.answer(await runtime.schedule.describe())
-        elif name in ("check", "check_all", "summary", "summary_all"):
+        elif name in ("check", "check_all", "summary", "summary_all", "chart"):
             try:
                 cmd = parse_command(message.text)
             except ValueError as exc:
@@ -193,6 +254,8 @@ def build_dispatcher(runtime):
                 )
             elif not name.endswith("_all") and (not cmd.client_query or len(clients) != 1):
                 await select_client(message, clients, cmd)
+            elif name == "chart":
+                await launch_chart(message, message.from_user.id, clients[0].id, cmd.period)
             else:
                 await launch(
                     message,
