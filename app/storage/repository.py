@@ -6,6 +6,7 @@ from sqlalchemy import delete, func, select, update
 
 from app.security import redact
 from app.storage.models import (
+    BotUser,
     ClientCounter,
     ClientPreference,
     ConversationState,
@@ -38,6 +39,26 @@ class Repository:
     def __init__(self, sessions, app_mode):
         self.sessions, self.app_mode = sessions, app_mode
         self.model_quota_lock = asyncio.Lock()
+
+    async def bot_users(self):
+        async with self.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(BotUser)
+                    .where(BotUser.app_mode == self.app_mode)
+                    .order_by(BotUser.user_id)
+                )
+            ).all()
+        return {int(r.user_id): {"enabled": r.enabled, "client_ids": r.client_ids} for r in rows}
+
+    async def set_bot_user(self, user_id, enabled, client_ids, actor):
+        async with self.sessions.begin() as session:
+            row = await session.get(BotUser, (self.app_mode, str(user_id)))
+            if row is None:
+                row = BotUser(app_mode=self.app_mode, user_id=str(user_id))
+                session.add(row)
+            row.enabled, row.client_ids = enabled, list(client_ids)
+            row.updated_by, row.updated_at = str(actor), datetime.now(UTC)
 
     async def reserve_model_call(self, chat_id, user_id, request_id, limit):
         # One bot process per database. Reservation is persisted before the API call.
@@ -148,6 +169,63 @@ class Repository:
         if len(by_day) != period.days:
             return None
         return [by_day[str(period.start + timedelta(days=offset))] for offset in range(period.days)]
+
+    async def data_status(self, client_id, period):
+        """Read bounded metadata only; never load campaign or search-query payloads."""
+        async with self.sessions() as session:
+            daily = (
+                (
+                    await session.execute(
+                        select(
+                            DailySnapshot.day,
+                            DailySnapshot.quality,
+                            DailySnapshot.captured_at,
+                            DailySnapshot.refresh_after,
+                            DailySnapshot.payload["direct"]["status"].as_string().label("direct"),
+                            DailySnapshot.payload["metrica"]["status"].as_string().label("metrica"),
+                        ).where(
+                            DailySnapshot.app_mode == self.app_mode,
+                            DailySnapshot.client_id == client_id,
+                            DailySnapshot.day >= str(period.start),
+                            DailySnapshot.day <= str(period.end),
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            latest = (
+                (
+                    await session.execute(
+                        select(
+                            SnapshotCache.period_start,
+                            SnapshotCache.period_end,
+                            SnapshotCache.captured_at,
+                            SnapshotCache.expires_at,
+                            SnapshotCache.payload["direct"]["status"].as_string().label("direct"),
+                            SnapshotCache.payload["metrica"]["status"].as_string().label("metrica"),
+                            SnapshotCache.payload["direct"]["limitations"].label("direct_limits"),
+                            SnapshotCache.payload["metrica"]["limitations"].label("metrica_limits"),
+                        )
+                        .where(
+                            SnapshotCache.app_mode == self.app_mode,
+                            SnapshotCache.client_id == client_id,
+                        )
+                        .order_by(SnapshotCache.captured_at.desc())
+                        .limit(1)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        dimensions = await self.dimension_progress(
+            [client_id], period.start, period.end, ("device", "geo", "search", "placement")
+        )
+        return {
+            "daily": [dict(row) for row in daily],
+            "latest": dict(latest) if latest else None,
+            "dimensions": dimensions,
+        }
 
     async def save_daily_snapshot(self, client_id, period, snapshot, *, quick=False):
         if period.days != 1:

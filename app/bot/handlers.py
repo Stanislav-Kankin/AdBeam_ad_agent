@@ -56,7 +56,11 @@ async def send_part(bot, chat_id, text, entities=None):
 def build_dispatcher(runtime):
     dp, router = Dispatcher(), Router()
     middleware = AccessMiddleware(
-        runtime.settings.telegram_allowed_chat_ids, runtime.settings.telegram_allowed_user_ids
+        runtime.settings.telegram_allowed_chat_ids,
+        runtime.settings.telegram_allowed_user_ids,
+        repository=runtime.checks.repository,
+        registry=runtime.registry,
+        admins=runtime.settings.telegram_admin_user_ids,
     )
     router.message.outer_middleware(middleware)
     router.callback_query.outer_middleware(middleware)

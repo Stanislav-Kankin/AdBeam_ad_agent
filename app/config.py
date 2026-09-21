@@ -64,15 +64,27 @@ class ClientRegistry:
         self, clients: list[Client], allowed_chats: list[int], errors=None, overrides=None
     ):
         self.clients = {c.id: c for c in clients}
-        self.allowed_chats = frozenset(allowed_chats)
+        self.base_allowed_chats = frozenset(allowed_chats)
+        self.user_grants = {}
         self.errors: list[str] = errors or []
         self.overrides = overrides or {}
+
+    @property
+    def allowed_chats(self):
+        return self.base_allowed_chats | self.user_grants.keys()
 
     def visible(self, chat_id: int) -> list[Client]:
         if chat_id not in self.allowed_chats:
             return []
         return [
-            c for c in self.clients.values() if c.active and chat_id in c.telegram.allowed_chat_ids
+            c
+            for c in self.clients.values()
+            if c.active
+            and (
+                c.id in self.user_grants[chat_id]
+                if chat_id in self.user_grants
+                else chat_id in c.telegram.allowed_chat_ids
+            )
         ]
 
     def require(self, chat_id: int, client_id: str) -> Client:

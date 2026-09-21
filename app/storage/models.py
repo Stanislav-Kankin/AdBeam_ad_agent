@@ -13,6 +13,16 @@ class Base(DeclarativeBase):
     pass
 
 
+class BotUser(Base):
+    __tablename__ = "bot_users"
+    app_mode: Mapped[str] = mapped_column(String(20), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean)
+    client_ids: Mapped[list] = mapped_column(JSON, default=list)
+    updated_by: Mapped[str] = mapped_column(String(30))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Run(Base):
     __tablename__ = "check_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))

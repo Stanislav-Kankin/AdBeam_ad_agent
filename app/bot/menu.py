@@ -4,9 +4,11 @@ import secrets
 from time import monotonic
 
 from aiogram import F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.domain.reports import CheckMode
+from app.reporting.data_status import describe_data
 
 PAGE_SIZE = 8
 GOAL_PAGE_SIZE = 7
@@ -21,6 +23,40 @@ PERIODS = (
 
 def install_menu(router, runtime, launch, launch_chart):
     actions = {}
+    awaiting_user = {}
+
+    @router.message(
+        lambda message: (
+            message.text is not None and (message.chat.id, message.from_user.id) in awaiting_user
+        )
+    )
+    async def add_user_input(message):
+        key = (message.chat.id, message.from_user.id)
+        started = awaiting_user.pop(key)
+        if message.from_user.id not in runtime.settings.telegram_admin_user_ids:
+            return
+        if message.text.strip() in ("/cancel", "/menu", "/start"):
+            await show(message, message.from_user.id)
+            return
+        value = message.text.strip()
+        if monotonic() - started > 600:
+            await message.answer("Время ввода истекло. Откройте раздел «Пользователи» заново.")
+            return
+        if not value.isascii() or not value.isdigit() or not 0 < int(value) < 2**63:
+            awaiting_user[key] = started
+            await message.answer("Нужен числовой Telegram ID пользователя. /cancel — отмена.")
+            return
+        uid = int(value)
+        if uid in runtime.settings.telegram_admin_user_ids:
+            await message.answer("Это администратор из .env. Его права уже настроены.")
+        else:
+            ids = [c.id for c in runtime.registry.visible(message.chat.id)]
+            await runtime.checks.repository.set_bot_user(uid, True, ids, message.from_user.id)
+            await message.answer(
+                f"Пользователь {uid} добавлен. Доступных клиентов: {len(ids)}. "
+                "Теперь он может открыть личный чат с ботом и отправить /start."
+            )
+        await show(message, message.from_user.id, screen="users")
 
     def clear(chat, user):
         for key, value in list(actions.items()):
@@ -47,10 +83,49 @@ def install_menu(router, runtime, launch, launch_chart):
             row("👥 Клиенты", "clients")
             row("📊 Аналитика всех клиентов", "report")
             if user in runtime.settings.telegram_admin_user_ids:
+                row("👤 Пользователи", "users")
                 row("🕙 Расписание", "schedule")
                 if runtime.discovery:
                     row("🔄 Обновить клиентов Яндекса", "refresh")
             row("❓ Помощь", "help")
+        elif screen == "users":
+            if user not in runtime.settings.telegram_admin_user_ids:
+                raise PermissionError
+            members = await runtime.checks.repository.bot_users()
+            configured = set(runtime.settings.telegram_allowed_user_ids) | {
+                uid for uid in runtime.settings.telegram_allowed_chat_ids if uid > 0
+            }
+            ids = sorted(
+                configured | members.keys() | set(runtime.settings.telegram_admin_user_ids)
+            )
+            pages = max(1, (len(ids) + PAGE_SIZE - 1) // PAGE_SIZE)
+            page = min(max(page, 0), pages - 1)
+            text = badge + f"Пользователи · страница {page + 1}/{pages}\n"
+            text += (
+                "Добавление открывает личный чат и доступ к вашим текущим клиентам. "
+                "Новые клиенты позже автоматически не добавляются.\n"
+                "Удаление отзывает доступ к боту, в том числе в разрешённых группах. "
+                "Уже запущенная работа может завершиться.\n"
+            )
+            for uid in ids[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]:
+                if uid in runtime.settings.telegram_admin_user_ids:
+                    text += f"\n🔐 {uid} — администратор (.env)"
+                else:
+                    enabled = members.get(uid, {}).get("enabled", True)
+                    text += f"\n{'✅' if enabled else '⛔'} {uid}"
+                    row(
+                        ("Удалить " if enabled else "Добавить снова ") + str(uid),
+                        "member_revoke" if enabled else "member_restore",
+                        member_id=uid,
+                        page=page,
+                    )
+            if not runtime.settings.telegram_allowed_user_ids:
+                text += "\n\nВ группах из .env действует прежний доступ для участников; список выше не является списком всех участников групп."
+            row("➕ Добавить по Telegram ID", "member_add")
+            if page:
+                row("← Назад", "users", page=page - 1)
+            if page + 1 < pages:
+                row("Вперёд →", "users", page=page + 1)
         elif screen == "clients":
             pages = max(1, (len(clients) + PAGE_SIZE - 1) // PAGE_SIZE)
             page = min(max(page, 0), pages - 1)
@@ -92,6 +167,7 @@ def install_menu(router, runtime, launch, launch_chart):
                     mode=CheckMode.SUMMARY,
                 )
                 if client_id:
+                    row("🗂 Состояние данных", "status", client_id=client_id, page=page)
                     row(
                         "📈 График динамики", "period", client_id=client_id, page=page, mode="chart"
                     )
@@ -107,6 +183,13 @@ def install_menu(router, runtime, launch, launch_chart):
                     row(label, "run", client_id=client_id, mode=mode, period=period)
                 row("← Тип отчёта", "report", client_id=client_id, page=page)
             row("← Клиенты", "clients", page=page)
+        elif screen == "status":
+            text = badge + await describe_data(runtime, chat, client_id)
+            row("🔄 Обновить экран", "status", client_id=client_id, page=page)
+            row("🔎 Проверить клиента", "period", client_id=client_id, mode=CheckMode.STANDARD)
+            if runtime.inventory and user in runtime.settings.telegram_admin_user_ids:
+                row("⚙️ Данные и цели", "data", client_id=client_id)
+            row("← К отчёту", "report", client_id=client_id, page=page)
         elif screen == "data":
             if user not in runtime.settings.telegram_admin_user_ids or not runtime.inventory:
                 raise PermissionError
@@ -254,7 +337,11 @@ def install_menu(router, runtime, launch, launch_chart):
             actions.pop(next(iter(actions)))
         markup = InlineKeyboardMarkup(inline_keyboard=rows)
         if edit:
-            await message.edit_text(text, reply_markup=markup, parse_mode=None)
+            try:
+                await message.edit_text(text, reply_markup=markup, parse_mode=None)
+            except TelegramBadRequest as exc:
+                if "message is not modified" not in exc.message:
+                    raise
         else:
             await message.answer(text, reply_markup=markup, parse_mode=None)
 
@@ -281,6 +368,10 @@ def install_menu(router, runtime, launch, launch_chart):
                 action
                 in (
                     "schedule",
+                    "users",
+                    "member_add",
+                    "member_revoke",
+                    "member_restore",
                     "refresh",
                     "data",
                     "refresh_data",
@@ -297,7 +388,29 @@ def install_menu(router, runtime, launch, launch_chart):
             return
         clear(chat, user)
         await callback.answer()
-        if action == "refresh":
+        if action == "member_add":
+            awaiting_user[(chat, user)] = monotonic()
+            await callback.message.answer(
+                "Пришлите числовой Telegram ID пользователя. "
+                "Он получит доступ в личном чате ко всем клиентам, видимым вам здесь. /cancel — отмена."
+            )
+        elif action in ("member_revoke", "member_restore"):
+            uid = kwargs["member_id"]
+            if uid in runtime.settings.telegram_admin_user_ids:
+                await callback.message.answer("Администраторы управляются через .env.")
+                return
+            await runtime.checks.repository.set_bot_user(
+                uid,
+                action == "member_restore",
+                [c.id for c in runtime.registry.visible(chat)]
+                if action == "member_restore"
+                else [],
+                user,
+            )
+            await show(
+                callback.message, user, screen="users", page=kwargs.get("page", 0), edit=True
+            )
+        elif action == "refresh":
             await show(callback.message, user, edit=True)
 
             async def work():
