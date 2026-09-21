@@ -101,6 +101,15 @@ async def test_dimension_warehouse_continues_from_saved_page(runtime, client):
         [BreakdownRow(id="desktop", name="DESKTOP", totals=Totals(spend=10))],
         last_page=False,
     )
+    day_range = DateRange(start=day, end=day)
+    for visible in runtime.registry.visible(123456789):
+        for dimension in ("device", "geo", "search", "placement"):
+            if visible.id == client.id and dimension == "device":
+                continue
+            report = await runtime.checks.provider.breakdown(visible, day_range, dimension)
+            await runtime.checks.repository.save_dimension_page(
+                visible.id, day, dimension, 0, report.rows, last_page=True
+            )
     result = await runtime.checks.warm_dimension_next(123456789, days=1)
     assert result[:4] == (client.id, day, "device", 1)
     report = await runtime.checks.breakdown(client, DateRange(start=day, end=day), "device")

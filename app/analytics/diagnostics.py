@@ -145,8 +145,9 @@ class CheckService:
             for offset in range(days):
                 day = yesterday - timedelta(days=offset)
                 period = DateRange(start=day, end=day)
-                for client in clients:
-                    for dimension in WAREHOUSE_DIMENSIONS:
+                candidates = []
+                for client_index, client in enumerate(clients):
+                    for dimension_index, dimension in enumerate(WAREHOUSE_DIMENSIONS):
                         item = progress.get((client.id, str(day), dimension))
                         if item:
                             pages = item["pages"]
@@ -161,25 +162,27 @@ class CheckService:
                             page = 0
                         if page >= 100:
                             continue
-                        logger.info(
-                            "Dimension warehouse warm client=%s day=%s dimension=%s page=%s",
-                            client.id,
-                            day,
-                            dimension,
-                            page + 1,
-                        )
-                        rows, complete = await self.provider.breakdown_page(
-                            client, period, dimension, page
-                        )
-                        await self.repository.save_dimension_page(
-                            client.id,
-                            day,
-                            dimension,
-                            page,
-                            rows,
-                            last_page=complete,
-                        )
-                        return client.id, day, dimension, page, complete
+                        candidates.append((page, client_index, dimension_index, client, dimension))
+                if not candidates:
+                    continue
+                page, _, _, client, dimension = min(candidates, key=lambda value: value[:3])
+                logger.info(
+                    "Dimension warehouse warm client=%s day=%s dimension=%s page=%s",
+                    client.id,
+                    day,
+                    dimension,
+                    page + 1,
+                )
+                rows, complete = await self.provider.breakdown_page(client, period, dimension, page)
+                await self.repository.save_dimension_page(
+                    client.id,
+                    day,
+                    dimension,
+                    page,
+                    rows,
+                    last_page=complete,
+                )
+                return client.id, day, dimension, page, complete
         return None
 
     async def breakdown(self, client, period, dimension):
