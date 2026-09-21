@@ -1,6 +1,6 @@
 from datetime import date
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from app.analytics.periods import AnalysisPeriod, DateRange, make_period
 from app.domain.clients import StrictModel
@@ -14,13 +14,53 @@ class ListArgs(StrictModel):
 
 class ClientArgs(StrictModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    client_id: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
-    period: str = "7d"
+    client_id: str = Field(
+        min_length=1,
+        max_length=200,
+        description="ID, точное имя, логин или алиас клиента из list_clients.",
+    )
+    period: str = Field(
+        default="7d",
+        description="Завершённый период: yesterday или 1d–90d, например 30d или 60d.",
+    )
     top_n: int = Field(default=10, ge=1, le=50)
     start_date: date | None = None
     end_date: date | None = None
     compare_start: date | None = None
     compare_end: date | None = None
+
+    @field_validator("client_id")
+    @classmethod
+    def clean_client(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("Пустая ссылка на клиента.")
+        return value
+
+    @field_validator("period", mode="before")
+    @classmethod
+    def normalize_period(cls, value):
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().casefold().replace(" ", "")
+        aliases = {
+            "day": "1d",
+            "1day": "1d",
+            "7days": "7d",
+            "14days": "14d",
+            "30days": "30d",
+            "60days": "60d",
+            "90days": "90d",
+            "1m": "30d",
+            "1month": "30d",
+            "2m": "60d",
+            "2months": "60d",
+            "месяц": "30d",
+            "2месяца": "60d",
+        }
+        if normalized.isdigit():
+            normalized += "d"
+        return aliases.get(normalized, normalized)
 
     @model_validator(mode="after")
     def validate_period(self):

@@ -5,6 +5,7 @@ import pytest
 import yaml
 from sqlalchemy import select
 
+from app.agent.schemas import ClientArgs
 from app.agent.service import AgentService
 from app.agent.tools import DESCRIPTIONS, ToolRegistry
 from app.analytics.periods import make_period
@@ -74,6 +75,33 @@ async def test_multistep_model_and_audit(runtime):
         assert run.duration_seconds is not None and run.duration_seconds >= 0
 
 
+@pytest.mark.parametrize("period", ["30d", "60d", "60", "60 days", "2m", "2 месяца"])
+def test_long_period_aliases_are_valid(period):
+    args = ClientArgs(client_id="ab-grandline", period=period)
+    expected = 60 if "60" in period or "2" in period else 30
+    assert args.analysis_period().current.days == expected
+
+
+async def test_tool_accepts_client_login_and_long_period(runtime):
+    result = await runtime.agent.tools.call(
+        "compare_periods",
+        '{"client_id":"example-west","period":"60d"}',
+        chat_id=123456789,
+        request_id="long-period",
+    )
+    assert result["client_id"] == "west_export"
+    assert result["period"]["current"]["start"] < result["period"]["current"]["end"]
+
+
+def test_custom_iso_period_is_valid_json():
+    args = ClientArgs.model_validate_json(
+        '{"client_id":"ab-grandline","start_date":"2026-07-23",'
+        '"end_date":"2026-09-20","compare_start":"2026-05-24",'
+        '"compare_end":"2026-07-22"}'
+    )
+    assert args.analysis_period().current.days == 60
+
+
 async def test_eight_tool_call_budget(runtime):
     class Endless:
         async def complete(self, messages, tools):
@@ -118,6 +146,17 @@ async def test_llm_failure_before_tools_still_checks_explicit_client(runtime):
         "Проверь West Экспорт за 7 дней", 123456789, 1
     )
     assert "DeepSeek недоступен" in answer and "84 000,00" in answer
+
+
+async def test_llm_failure_understands_two_month_period(runtime):
+    llm = AsyncMock()
+    llm.complete.side_effect = RuntimeError("unavailable")
+    run_check = AsyncMock(wraps=runtime.checks.run_check)
+    runtime.checks.run_check = run_check
+    await AgentService(runtime.checks, llm).ask(
+        "Сделай анализ Grand Line за последние 2 месяца", 123456789, 1
+    )
+    assert run_check.await_args.args[1].current.days == 60
 
 
 async def test_no_model_does_not_guess_client_or_custom_dates(runtime):

@@ -76,7 +76,10 @@ class ToolRegistry:
                     if len(clients) > args.offset + args.top_n
                     else None,
                 }
-            client = self.checks.registry.require(chat_id, args.client_id)
+            matches = self.checks.registry.resolve(chat_id, args.client_id)
+            if len(matches) != 1:
+                raise PermissionError
+            client = matches[0]
             period = args.analysis_period()
             base = {
                 "client_id": client.id,
@@ -104,8 +107,8 @@ class ToolRegistry:
                     (now.direct, before.direct)
                     if dim == "campaign"
                     else (
-                        await self.checks.provider.breakdown(client, period.current, dim),
-                        await self.checks.provider.breakdown(client, period.previous, dim),
+                        await self.checks.breakdown(client, period.current, dim),
+                        await self.checks.breakdown(client, period.previous, dim),
                     )
                 )
                 rows = []
@@ -180,10 +183,23 @@ class ToolRegistry:
             }
         except PermissionError:
             status, error = "denied", "Клиент не найден или недоступен этому чату."
-        except (ValidationError, ValueError, TypeError):
+        except ValidationError as exc:
+            fields = sorted(
+                {
+                    ".".join(str(part) for part in item["loc"])
+                    for item in exc.errors(include_input=False, include_url=False)
+                }
+            )
             status, error = (
                 "invalid",
-                "Неверный инструмент или параметры. Проверь ID, даты (до 90 завершённых дней) и top_n (1–50).",
+                "Некорректные параметры: "
+                + (", ".join(fields) if fields else "неизвестное поле")
+                + ". Используйте ID/логин из list_clients, period 1d–90d или четыре ISO-даты.",
+            )
+        except (ValueError, TypeError):
+            status, error = (
+                "invalid",
+                "Период или параметры несопоставимы. Используйте завершённые равные периоды до 90 дней.",
             )
         except Exception:
             status, error = "error", "Инструмент недоступен. Данные не получены."

@@ -296,7 +296,16 @@ class AgentService:
                 + "\nДля этого периода используйте /check с 1d–90d или повторите вопрос позже."
             )
         match = re.search(r"\b(\d{1,3})\s*(?:d\b|дн|дней)", question)
-        period_name = f"{match[1]}d" if match else "yesterday" if "вчера" in question else "7d"
+        month_match = re.search(r"\b([1-3])\s*(?:месяц|месяца|месяцев|month|months)", question)
+        period_name = (
+            f"{match[1]}d"
+            if match
+            else f"{int(month_match[1]) * 30}d"
+            if month_match
+            else "yesterday"
+            if "вчера" in question
+            else "7d"
+        )
         try:
             reports, report = await self.checks.run_check(
                 [c.id for c in selected],

@@ -84,9 +84,15 @@ class ClientRegistry:
     def resolve(self, chat_id: int, query: str) -> list[Client]:
         query = query.casefold().strip()
         visible = self.visible(chat_id)
-        exact = [c for c in visible if query in [x.casefold() for x in [c.id, c.name, *c.aliases]]]
+        exact = [
+            c
+            for c in visible
+            if query in [x.casefold() for x in [c.id, c.name, c.direct.client_login, *c.aliases]]
+        ]
         return exact or [
-            c for c in visible if any(query in x.casefold() for x in [c.id, c.name, *c.aliases])
+            c
+            for c in visible
+            if any(query in x.casefold() for x in [c.id, c.name, c.direct.client_login, *c.aliases])
         ]
 
 
