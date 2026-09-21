@@ -37,10 +37,19 @@ def test_tsv_goals_micros_empty_and_unknown():
     rows = parse_tsv(
         TSV.replace("\t2\n", "\t--\n"), ["123456"], "LC", ["CampaignId", "CampaignName"]
     )
-    assert rows[0].totals.conversions is None
+    assert rows[0].totals.conversions == 0
     assert (
         parse_tsv(TSV.splitlines()[0] + "\n", ["123456"], "LC", ["CampaignId", "CampaignName"])
         == []
+    )
+    two_goals = TSV.replace(
+        "Conversions_123456_LC", "Conversions_123456_LC\tConversions_789_LC"
+    ).replace("\t2\n", "\t2\t--\n")
+    assert (
+        parse_tsv(two_goals, ["123456", "789"], "LC", ["CampaignId", "CampaignName"])[
+            0
+        ].totals.conversions
+        == 2
     )
 
 

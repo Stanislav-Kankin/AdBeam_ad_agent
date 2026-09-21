@@ -38,9 +38,12 @@ def parse_tsv(text: str, goals: list[str], attribution: str, fields: list[str]):
     rows = []
     for raw in reader:
         conversions = [raw.get(column) for column in columns]
+        # Direct Reports uses `--` for a goal with no attributed conversions
+        # (including in Yandex's official Metrica report example). It is zero,
+        # while a missing/empty column means that the metric is unavailable.
         conversion_total = (
-            sum((number(v) for v in conversions), Decimal(0))
-            if conversions and all(v not in (None, "", "--") for v in conversions)
+            sum((Decimal(0) if v == "--" else number(v) for v in conversions), Decimal(0))
+            if conversions and all(v not in (None, "") for v in conversions)
             else None
         )
         totals = Totals(

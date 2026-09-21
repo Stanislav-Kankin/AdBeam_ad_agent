@@ -114,6 +114,25 @@ async def test_tracking_failure_suppresses_conversion_claims(runtime, client):
     assert not any(s.type in ("cpa_high", "spend_without_conversions", "cr_drop") for s in signals)
 
 
+async def test_tracking_failure_hides_campaign_conversion_metrics(runtime, client, monkeypatch):
+    period = make_period()
+    current, previous = await runtime.checks.snapshots(client, period)
+    current.metrica.status = DataStatus.UNAVAILABLE
+
+    async def snapshots(*args, **kwargs):
+        return current, previous
+
+    monkeypatch.setattr(runtime.checks, "snapshots", snapshots)
+    report = await runtime.checks.analyze(client, period, CheckMode.STANDARD)
+    assert report.drivers
+    assert all(
+        row[key][metric] is None
+        for row in report.drivers
+        for key in ("current", "previous")
+        for metric in ("conversions", "cr", "cpa")
+    )
+
+
 async def test_zero_conversions_everywhere_is_tracking_signal(runtime, client):
     p = make_period()
     a, b = await runtime.checks.snapshots(client, p)

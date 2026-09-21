@@ -280,6 +280,10 @@ class CheckService:
                 if not health["healthy"]:
                     for row in campaign_drivers:
                         row["conversions_delta"] = None
+                        for key in ("current", "previous"):
+                            row[key]["conversions"] = None
+                            row[key]["cr"] = None
+                            row[key]["cpa"] = None
                 threshold = client.targets.minimum_spend_for_analysis
                 if client.targets.target_cpa:
                     threshold = min(
