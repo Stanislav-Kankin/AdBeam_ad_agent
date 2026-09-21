@@ -329,41 +329,55 @@ def build_dispatcher(runtime):
             if not replied and not mentioned:
                 return
 
+        presentation = ReportMessage(message)
+        state = {"stage": "разбираю вопрос и проверяю данные"}
+
         async def work():
-            await message.answer("Разбираю вопрос и проверяю данные.")
-            before = await runtime.checks.repository.conversation(
-                message.chat.id, message.from_user.id
-            )
-            answer = await runtime.agent.ask(message.text, message.chat.id, message.from_user.id)
-            await send_text(message.bot, message.chat.id, answer, markdown=True)
-            mentioned = mentioned_clients(message.text, message.chat.id)
-            if (
-                ANALYTICS_WORDS.search(message.text)
-                and not ALL_CLIENTS_WORDS.search(message.text)
-                and len(mentioned) <= 1
-            ):
-                context = await runtime.checks.repository.conversation(
+            token = progress_state.set(state)
+            logger.info("Question started message_id=%s", message.message_id)
+            try:
+                await presentation.start(state)
+                before = await runtime.checks.repository.conversation(
                     message.chat.id, message.from_user.id
                 )
-                context_changed = context.get("active_client_id") != before.get(
-                    "active_client_id"
-                ) or context.get("period") != before.get("period")
+                answer = await runtime.agent.ask(
+                    message.text, message.chat.id, message.from_user.id
+                )
+                await presentation.finish(answer, markdown=True)
+                mentioned = mentioned_clients(message.text, message.chat.id)
                 if (
-                    context.get("active_client_id")
-                    and context.get("period")
-                    and (mentioned or context_changed)
+                    ANALYTICS_WORDS.search(message.text)
+                    and not ALL_CLIENTS_WORDS.search(message.text)
+                    and len(mentioned) <= 1
                 ):
-                    try:
-                        client = runtime.registry.require(
-                            message.chat.id, context["active_client_id"]
-                        )
-                        period = AnalysisPeriod.model_validate(context["period"])
-                        await send_chart(message, client, period)
-                    except Exception:
-                        logger.exception("Question chart failed")
+                    context = await runtime.checks.repository.conversation(
+                        message.chat.id, message.from_user.id
+                    )
+                    context_changed = context.get("active_client_id") != before.get(
+                        "active_client_id"
+                    ) or context.get("period") != before.get("period")
+                    if (
+                        context.get("active_client_id")
+                        and context.get("period")
+                        and (mentioned or context_changed)
+                    ):
+                        try:
+                            client = runtime.registry.require(
+                                message.chat.id, context["active_client_id"]
+                            )
+                            period = AnalysisPeriod.model_validate(context["period"])
+                            await send_chart(message, client, period)
+                        except Exception:
+                            logger.exception("Question chart failed")
+            except Exception:
+                logger.exception("Question failed stage=%s", state["stage"])
+                raise
+            finally:
+                await presentation.stop()
+                progress_state.reset(token)
 
         async def failed():
-            await message.answer("Не удалось обработать вопрос. Попробуйте /check <клиент>.")
+            await presentation.finish("Не удалось обработать вопрос. Попробуйте /check <клиент>.")
 
         if not runtime.jobs.start((message.chat.id, message.from_user.id), work, failed):
             await message.answer("Ваш запрос уже выполняется или все рабочие слоты заняты.")

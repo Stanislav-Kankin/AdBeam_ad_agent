@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import (
     AnswerCallbackQuery,
     DeleteMessage,
@@ -159,6 +160,26 @@ async def test_unknown_chats_silent(runtime):
     async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
         await build_dispatcher(runtime).feed_update(bot, message_update("/clients", chat=999))
     assert not session.sent
+
+
+async def test_question_continues_when_initial_status_delivery_fails(runtime):
+    class FlakyTelegram(FakeTelegram):
+        failed = False
+
+        async def make_request(self, bot, method, timeout=None):  # noqa: ASYNC109
+            if isinstance(method, SendMessage) and not self.failed:
+                self.failed = True
+                raise TelegramNetworkError(method=method, message="Request timeout error")
+            return await super().make_request(bot, method, timeout)
+
+    session = FlakyTelegram()
+    runtime.agent.ask = AsyncMock(return_value="Готовый анализ")
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        await build_dispatcher(runtime).feed_update(bot, message_update("Проверь клиента"))
+        await runtime.jobs.close()
+    runtime.agent.ask.assert_awaited_once()
+    assert any(isinstance(m, SendMessage) and m.text == "Готовый анализ" for m in session.sent)
+    assert not runtime.jobs.tasks
 
 
 @pytest.mark.parametrize("all_clients", [False, True])

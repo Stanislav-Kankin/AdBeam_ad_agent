@@ -4,7 +4,7 @@ import asyncio
 import logging
 from time import monotonic
 
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.types import MessageEntity
 
 from app.bot.markdown import markdown_parts
@@ -62,6 +62,11 @@ async def retry_telegram(call):
             if attempt == 2 or exc.retry_after > 60:
                 raise
             await asyncio.sleep(exc.retry_after)
+        except (TelegramNetworkError, TimeoutError):
+            if attempt == 2:
+                raise
+            logger.warning("Telegram delivery retry attempt=%s", attempt + 2)
+            await asyncio.sleep(1 + attempt)
 
 
 class ReportMessage:
@@ -71,11 +76,19 @@ class ReportMessage:
         self.task = None
 
     async def start(self, state):
-        self.status = await self.message.answer(
-            "● ○ ○  Проверка началась. Пришлю результат сюда.", parse_mode=None
-        )
-        self.status.as_(self.message.bot)
+        await self.send_status()
         self.task = asyncio.create_task(self.animate(state))
+
+    async def send_status(self):
+        try:
+            self.status = await self.message.answer(
+                "● ○ ○  Проверка началась. Пришлю результат сюда.",
+                parse_mode=None,
+                request_timeout=7,
+            )
+            self.status.as_(self.message.bot)
+        except (TelegramNetworkError, TimeoutError):
+            logger.warning("Progress delivery failed; analysis continues")
 
     async def animate(self, state):
         started, frame = monotonic(), 0
@@ -84,6 +97,9 @@ class ReportMessage:
             frame += 1
             text = f"{FRAMES[frame % len(FRAMES)]}  Проверка выполняется · {int(monotonic() - started)} с\n\n{state['stage']}"
             try:
+                if self.status is None:
+                    await self.send_status()
+                    continue
                 async with asyncio.timeout(7):
                     await self.status.edit_text(text, parse_mode=None)
             except TelegramRetryAfter as exc:

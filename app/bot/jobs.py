@@ -24,7 +24,7 @@ class BackgroundJobs:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.error("Background job failed (%s)", type(exc).__name__)
+                logger.exception("Background job failed (%s)", type(exc).__name__)
                 try:
                     await on_error()
                 except Exception:
