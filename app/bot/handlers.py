@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import secrets
 from time import monotonic
@@ -7,7 +8,7 @@ from aiogram import Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.analytics.periods import make_period
+from app.analytics.periods import AnalysisPeriod, make_period
 from app.analytics.progress import progress_state
 from app.bot.commands import HELP, parse_command
 from app.bot.markdown import markdown_parts
@@ -17,6 +18,15 @@ from app.bot.report_message import ReportMessage, report_entities
 from app.domain.reports import CheckMode, TriggerSource
 from app.reporting.charts import render_dynamics
 from app.reporting.formatter import split_message
+
+logger = logging.getLogger(__name__)
+
+ANALYTICS_WORDS = re.compile(
+    r"анализ|аналитик|обзор|отч[её]т|динамик|показател|расход|клик|конверс|"
+    r"трафик|кампан|директ|метрик|\bcpa\b|\bctr\b|\bcpc\b|\bcr\b|дрр",
+    re.IGNORECASE,
+)
+ALL_CLIENTS_WORDS = re.compile(r"все\s+клиент|по\s+всем\s+клиент|всех\s+клиент", re.IGNORECASE)
 
 
 async def send_text(bot, chat_id, text, *, markdown=False):
@@ -52,23 +62,60 @@ def build_dispatcher(runtime):
     router.callback_query.outer_middleware(middleware)
     pending = {}
 
+    def client_label(client):
+        name = client.name.strip()
+        login = client.direct.client_login.strip()
+        return name if login.casefold() in name.casefold() else f"{name} · {login}"
+
+    def mentioned_clients(text, chat_id):
+        folded = text.casefold()
+        found = []
+        for client in runtime.registry.visible(chat_id):
+            references = [client.name, client.direct.client_login, *client.aliases]
+            if any(len(ref.strip()) >= 3 and ref.casefold() in folded for ref in references):
+                found.append(client.id)
+        return set(found)
+
+    async def send_chart(message, client, period, data=None):
+        current, previous = data or await runtime.checks.dynamics(client, period)
+        if any(result.status.value not in ("ok", "no_data") for result in (current, previous)):
+            return False
+        label = client_label(client)
+        image = await asyncio.to_thread(render_dynamics, label, period, current, previous)
+        await message.bot.send_photo(
+            message.chat.id,
+            BufferedInputFile(image, filename="adbeam-dynamics.png"),
+            caption=(
+                f"📈 {label} · {period.current.label()}\n"
+                f"Сравнение: {period.previous.label()}\n"
+                "Сплошная линия — текущий период; пунктир — предыдущий. Источник: Директ."
+            ),
+        )
+        return True
+
     async def launch(message, user_id, client_ids, period, mode):
         presentation = ReportMessage(message)
 
         async def work():
             state = {"stage": "ожидаю свободного места в очереди"}
             token = progress_state.set(state)
+            chart_task = None
             try:
                 await presentation.start(state)
+                analysis_period = make_period(period)
                 reports, text = await runtime.checks.run_check(
                     client_ids,
-                    make_period(period),
+                    analysis_period,
                     mode,
                     TriggerSource.TELEGRAM,
                     chat_id=message.chat.id,
                     user_id=user_id,
                 )
                 if len(client_ids) == 1:
+                    client = runtime.registry.require(message.chat.id, client_ids[0])
+                    chart_task = asyncio.create_task(
+                        runtime.checks.dynamics(client, analysis_period)
+                    )
                     await runtime.checks.repository.save_conversation(
                         message.chat.id,
                         user_id,
@@ -82,7 +129,21 @@ def build_dispatcher(runtime):
                 )
                 state["stage"] = "отправляю результат"
                 await presentation.finish(text, markdown=markdown)
+                if chart_task:
+                    try:
+                        if not await send_chart(message, client, analysis_period, await chart_task):
+                            await message.answer(
+                                "Текстовый анализ готов, но дневные данные для графика временно недоступны."
+                            )
+                    except Exception:
+                        logger.exception("Automatic chart failed client=%s", client.id)
+                        await message.answer(
+                            "Текстовый анализ готов, но график построить не удалось."
+                        )
             finally:
+                if chart_task and not chart_task.done():
+                    chart_task.cancel()
+                    await asyncio.gather(chart_task, return_exceptions=True)
                 await presentation.stop()
                 progress_state.reset(token)
 
@@ -106,34 +167,20 @@ def build_dispatcher(runtime):
                 await presentation.start(state)
                 client = runtime.registry.require(message.chat.id, client_id)
                 period = make_period(period_name)
-                current, previous = await runtime.checks.dynamics(client, period)
-                if any(
-                    result.status.value not in ("ok", "no_data") for result in (current, previous)
-                ):
+                data = await runtime.checks.dynamics(client, period)
+                if any(result.status.value not in ("ok", "no_data") for result in data):
                     await presentation.finish(
                         "График не построен: дневная статистика Директа временно недоступна."
                     )
                     return
                 state["stage"] = "рисую график"
-                client_label = f"{client.name} · {client.direct.client_login}"
-                image = await asyncio.to_thread(
-                    render_dynamics, client_label, period, current, previous
-                )
                 await presentation.stop()
                 if presentation.status:
                     try:
                         await presentation.status.delete()
                     except TelegramBadRequest:
                         pass
-                await message.bot.send_photo(
-                    message.chat.id,
-                    BufferedInputFile(image, filename="adbeam-dynamics.png"),
-                    caption=(
-                        f"📈 {client_label} · {period.current.label()}\n"
-                        f"Сравнение: {period.previous.label()}\n"
-                        "Сплошная линия — текущий период; пунктир — предыдущий. Источник: Директ."
-                    ),
-                )
+                await send_chart(message, client, period, data)
                 await runtime.checks.repository.save_conversation(
                     message.chat.id,
                     user_id,
@@ -284,8 +331,36 @@ def build_dispatcher(runtime):
 
         async def work():
             await message.answer("Разбираю вопрос и проверяю данные.")
+            before = await runtime.checks.repository.conversation(
+                message.chat.id, message.from_user.id
+            )
             answer = await runtime.agent.ask(message.text, message.chat.id, message.from_user.id)
             await send_text(message.bot, message.chat.id, answer, markdown=True)
+            mentioned = mentioned_clients(message.text, message.chat.id)
+            if (
+                ANALYTICS_WORDS.search(message.text)
+                and not ALL_CLIENTS_WORDS.search(message.text)
+                and len(mentioned) <= 1
+            ):
+                context = await runtime.checks.repository.conversation(
+                    message.chat.id, message.from_user.id
+                )
+                context_changed = context.get("active_client_id") != before.get(
+                    "active_client_id"
+                ) or context.get("period") != before.get("period")
+                if (
+                    context.get("active_client_id")
+                    and context.get("period")
+                    and (mentioned or context_changed)
+                ):
+                    try:
+                        client = runtime.registry.require(
+                            message.chat.id, context["active_client_id"]
+                        )
+                        period = AnalysisPeriod.model_validate(context["period"])
+                        await send_chart(message, client, period)
+                    except Exception:
+                        logger.exception("Question chart failed")
 
         async def failed():
             await message.answer("Не удалось обработать вопрос. Попробуйте /check <клиент>.")

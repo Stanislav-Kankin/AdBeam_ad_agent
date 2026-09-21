@@ -102,13 +102,13 @@ def _dashed(draw, points, fill, width=4, segment=12):
             )
 
 
-def _panel(draw, box, title, current, previous, *, money=False):
+def _panel(draw, box, title, current, previous, dates, *, money=False):
     x1, y1, x2, y2 = box
     draw.rounded_rectangle(box, radius=26, fill="white", outline=GRID, width=2)
     draw.text((x1 + 28, y1 + 22), title, font=_font(25, bold=True), fill=INK)
     values = [float(v or 0) for v in [*current, *previous]]
     high = max(values, default=0) or 1
-    plot = (x1 + 75, y1 + 72, x2 - 28, y2 - 45)
+    plot = (x1 + 75, y1 + 72, x2 - 28, y2 - 72)
     px1, py1, px2, py2 = plot
     for index in range(4):
         y = py1 + (py2 - py1) * index / 3
@@ -137,6 +137,26 @@ def _panel(draw, box, title, current, previous, *, money=False):
         draw.line(new_points, fill=BLUE, width=6, joint="curve")
     for x, y in new_points[:: max(1, len(new_points) // 12)]:
         draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=BLUE)
+    if dates:
+        count = len(dates)
+        tick_indexes = sorted({0, (count - 1) // 3, 2 * (count - 1) // 3, count - 1})
+        for index in tick_indexes:
+            x = px1 if count == 1 else px1 + (px2 - px1) * index / (count - 1)
+            draw.line((x, py2, x, py2 + 6), fill=MUTED, width=2)
+            draw.text(
+                (x, py2 + 9),
+                dates[index].strftime("%d.%m"),
+                font=_font(14),
+                fill=MUTED,
+                anchor="ma",
+            )
+        draw.text(
+            ((px1 + px2) / 2, py2 + 34),
+            "Дни текущего периода",
+            font=_font(13),
+            fill=MUTED,
+            anchor="ma",
+        )
 
 
 def render_dynamics(client_name, period, current: DirectData, previous: DirectData) -> bytes:
@@ -150,6 +170,7 @@ def render_dynamics(client_name, period, current: DirectData, previous: DirectDa
         fill=MUTED,
     )
     now_rows, old_rows = _daily(current), _daily(previous)
+    dates = [current.period.start + timedelta(days=index) for index in range(len(now_rows))]
     now_total, old_total = aggregate(now_rows), aggregate(old_rows)
     now_metrics, old_metrics = calculate(now_total), calculate(old_total)
     cards = (
@@ -178,21 +199,24 @@ def render_dynamics(client_name, period, current: DirectData, previous: DirectDa
         "Расход по дням, ₽",
         [row.spend for row in now_rows],
         [row.spend for row in old_rows],
+        dates,
         money=True,
     )
     _panel(
         draw,
         (65, 680, 790, 1010),
-        "Клики по дням",
+        "Клики по дням, шт.",
         [row.clicks for row in now_rows],
         [row.clicks for row in old_rows],
+        dates,
     )
     _panel(
         draw,
         (815, 680, 1535, 1010),
-        "Конверсии по дням",
+        "Конверсии по дням, шт.",
         [row.conversions for row in now_rows],
         [row.conversions for row in old_rows],
+        dates,
     )
     draw.line((65, 1055, 105, 1055), fill=BLUE, width=6)
     draw.text((120, 1040), "Текущий период", font=_font(19), fill=INK)
