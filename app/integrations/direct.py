@@ -77,7 +77,7 @@ class DirectAdapter:
             "skipColumnHeader": "false",
         }
 
-    async def breakdown(self, client, period, dimension="campaign", *, max_pages=REPORT_MAX_PAGES):
+    def report_params(self, client, period, dimension):
         report_type, fields = DIMENSIONS[dimension]
         params = {
             "SelectionCriteria": {"DateFrom": str(period.start), "DateTo": str(period.end)},
@@ -99,40 +99,47 @@ class DirectAdapter:
             params["SelectionCriteria"]["Filter"] = [
                 {"Field": "AdNetworkType", "Operator": "EQUALS", "Values": ["AD_NETWORK"]}
             ]
+        return params, fields
+
+    async def breakdown_page(self, client, period, dimension, page):
+        params, fields = self.report_params(client, period, dimension)
+        page_params = {
+            **params,
+            "Page": {"Limit": REPORT_PAGE_SIZE, "Offset": page * REPORT_PAGE_SIZE},
+        }
+        page_params["ReportName"] = (
+            "adbeam_"
+            + hashlib.sha256(json.dumps(page_params, sort_keys=True).encode()).hexdigest()[:24]
+        )
+        logger.info(
+            "Direct report page client=%s dimension=%s page=%s",
+            client.id,
+            dimension,
+            page + 1,
+        )
+        async with self.report_lock:
+            response = await self.transport.request(
+                "direct",
+                "POST",
+                REPORTS_URL,
+                pending=True,
+                headers=self.headers(client),
+                json={"params": page_params},
+            )
+        rows = parse_tsv(
+            response.text,
+            client.direct.main_goal_ids,
+            client.direct.attribution_model,
+            fields,
+        )
+        return rows, len(rows) < REPORT_PAGE_SIZE
+
+    async def breakdown(self, client, period, dimension="campaign", *, max_pages=REPORT_MAX_PAGES):
         rows, limited = [], False
         for page in range(max_pages):
-            logger.info(
-                "Direct report page client=%s dimension=%s page=%s max_pages=%s",
-                client.id,
-                dimension,
-                page + 1,
-                max_pages,
-            )
-            page_params = {
-                **params,
-                "Page": {"Limit": REPORT_PAGE_SIZE, "Offset": page * REPORT_PAGE_SIZE},
-            }
-            page_params["ReportName"] = (
-                "adbeam_"
-                + hashlib.sha256(json.dumps(page_params, sort_keys=True).encode()).hexdigest()[:24]
-            )
-            async with self.report_lock:
-                response = await self.transport.request(
-                    "direct",
-                    "POST",
-                    REPORTS_URL,
-                    pending=True,
-                    headers=self.headers(client),
-                    json={"params": page_params},
-                )
-            batch = parse_tsv(
-                response.text,
-                client.direct.main_goal_ids,
-                client.direct.attribution_model,
-                fields,
-            )
+            batch, complete = await self.breakdown_page(client, period, dimension, page)
             rows.extend(batch)
-            if len(batch) < REPORT_PAGE_SIZE:
+            if complete:
                 break
         else:
             limited = True

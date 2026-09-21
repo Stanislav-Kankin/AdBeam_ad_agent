@@ -192,6 +192,7 @@ def test_migration_preserves_old_rows(tmp_path):
         "client_counters",
         "snapshot_cache",
         "daily_snapshots",
+        "direct_dimension_pages",
         "conversation_states",
     }.issubset(inspector.get_table_names())
     with engine.connect() as conn:

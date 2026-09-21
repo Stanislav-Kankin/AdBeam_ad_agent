@@ -11,6 +11,7 @@ from app.storage.models import (
     ConversationState,
     DailySnapshot,
     Delivery,
+    DirectDimensionPage,
     MetricaCounterCatalog,
     Run,
     SnapshotCache,
@@ -94,6 +95,12 @@ class Repository:
                 )
             )
             await session.execute(
+                delete(DirectDimensionPage).where(
+                    DirectDimensionPage.app_mode == self.app_mode,
+                    DirectDimensionPage.captured_at < cutoff,
+                )
+            )
+            await session.execute(
                 delete(ConversationState).where(
                     ConversationState.app_mode == self.app_mode,
                     ConversationState.updated_at < cutoff,
@@ -149,12 +156,13 @@ class Repository:
         key = (self.app_mode, client_id, str(period.start), quality)
         captured = datetime.now(UTC)
         complete = all(
-            value.value == "ok" for value in (snapshot.direct.status, snapshot.metrica.status)
+            value.value in ("ok", "no_data")
+            for value in (snapshot.direct.status, snapshot.metrica.status)
         )
         age_days = (datetime.now(UTC).date() - period.end).days
         refresh_in = timedelta(hours=4 if age_days <= 3 else 24 * 30)
         if not complete:
-            refresh_in = timedelta(minutes=10)
+            refresh_in = timedelta(hours=1)
         async with self.sessions.begin() as session:
             row = await session.get(DailySnapshot, key)
             if row is None:
@@ -171,6 +179,116 @@ class Repository:
             row.complete = complete
             row.captured_at = captured
             row.refresh_after = captured + refresh_in
+
+    async def dimension_progress(self, client_ids, start, end, dimensions):
+        if not client_ids:
+            return {}
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        DirectDimensionPage.client_id,
+                        DirectDimensionPage.day,
+                        DirectDimensionPage.dimension,
+                        DirectDimensionPage.page,
+                        DirectDimensionPage.last_page,
+                    ).where(
+                        DirectDimensionPage.app_mode == self.app_mode,
+                        DirectDimensionPage.client_id.in_(client_ids),
+                        DirectDimensionPage.day >= str(start),
+                        DirectDimensionPage.day <= str(end),
+                        DirectDimensionPage.dimension.in_(dimensions),
+                        DirectDimensionPage.refresh_after > datetime.now(UTC),
+                    )
+                )
+            ).all()
+        progress = {}
+        for client_id, day, dimension, page, last_page in rows:
+            item = progress.setdefault((client_id, day, dimension), {"pages": set(), "last": None})
+            item["pages"].add(page)
+            if last_page:
+                item["last"] = page
+        return progress
+
+    async def save_dimension_page(self, client_id, day, dimension, page, rows, *, last_page):
+        key = (self.app_mode, client_id, str(day), dimension, page)
+        captured = datetime.now(UTC)
+        age_days = (datetime.now(UTC).date() - day).days
+        refresh_in = timedelta(hours=4 if age_days <= 3 else 24 * 30)
+        async with self.sessions.begin() as session:
+            row = await session.get(DirectDimensionPage, key)
+            if row is None:
+                row = DirectDimensionPage(
+                    app_mode=key[0],
+                    client_id=key[1],
+                    day=key[2],
+                    dimension=key[3],
+                    page=key[4],
+                    payload=[],
+                    refresh_after=captured,
+                )
+                session.add(row)
+            row.payload = safe_json([value.model_dump(mode="json") for value in rows])
+            row.last_page = last_page
+            row.captured_at = captured
+            row.refresh_after = captured + refresh_in
+
+    async def dimension(self, client_id, period, dimension, *, top_per_day=500):
+        async with self.sessions() as session:
+            metadata = (
+                await session.execute(
+                    select(
+                        DirectDimensionPage.day,
+                        DirectDimensionPage.page,
+                        DirectDimensionPage.last_page,
+                    ).where(
+                        DirectDimensionPage.app_mode == self.app_mode,
+                        DirectDimensionPage.client_id == client_id,
+                        DirectDimensionPage.day >= str(period.start),
+                        DirectDimensionPage.day <= str(period.end),
+                        DirectDimensionPage.dimension == dimension,
+                        DirectDimensionPage.refresh_after > datetime.now(UTC),
+                    )
+                )
+            ).all()
+        by_day = {}
+        for day, page, last_page in metadata:
+            item = by_day.setdefault(day, {"pages": set(), "last": None})
+            item["pages"].add(page)
+            if last_page:
+                item["last"] = page
+        for offset in range(period.days):
+            day = str(period.start + timedelta(days=offset))
+            item = by_day.get(day)
+            if (
+                item is None
+                or item["last"] is None
+                or item["pages"] != set(range(item["last"] + 1))
+            ):
+                return None
+        # Reports are sorted by cost, so page zero contains the most useful rows.
+        # All pages remain persisted; interactive analysis keeps a bounded daily slice.
+        async with self.sessions() as session:
+            first_pages = (
+                await session.scalars(
+                    select(DirectDimensionPage)
+                    .where(
+                        DirectDimensionPage.app_mode == self.app_mode,
+                        DirectDimensionPage.client_id == client_id,
+                        DirectDimensionPage.day >= str(period.start),
+                        DirectDimensionPage.day <= str(period.end),
+                        DirectDimensionPage.dimension == dimension,
+                        DirectDimensionPage.page == 0,
+                        DirectDimensionPage.refresh_after > datetime.now(UTC),
+                    )
+                    .order_by(DirectDimensionPage.day)
+                )
+            ).all()
+        payloads = [value for page in first_pages for value in page.payload[:top_per_day]]
+        truncated = any(len(page.payload) > top_per_day for page in first_pages) or any(
+            item["last"] > 0 for item in by_day.values()
+        )
+        return {"rows": payloads, "truncated": truncated}
 
     async def has_fresh_daily_snapshot(self, client_id, day):
         async with self.sessions() as session:
@@ -325,6 +443,12 @@ class Repository:
                 delete(DailySnapshot).where(
                     DailySnapshot.app_mode == self.app_mode,
                     DailySnapshot.client_id == client_id,
+                )
+            )
+            await session.execute(
+                delete(DirectDimensionPage).where(
+                    DirectDimensionPage.app_mode == self.app_mode,
+                    DirectDimensionPage.client_id == client_id,
                 )
             )
 

@@ -53,6 +53,60 @@ async def test_warehouse_warm_resumes_with_next_client(runtime):
     assert first[0] != second[0]
 
 
+async def test_dimension_warehouse_resumes_with_next_dimension(runtime):
+    day = today_moscow() - timedelta(days=1)
+    first = await runtime.checks.warm_dimension_next(123456789, days=1)
+    second = await runtime.checks.warm_dimension_next(123456789, days=1)
+    assert first[1] == second[1] == day
+    assert first[0] == second[0]
+    assert first[2:4] == ("device", 0)
+    assert second[2:4] == ("geo", 0)
+
+
+async def test_dimension_warehouse_combines_daily_pages(runtime, client):
+    from app.domain.reports import BreakdownRow, Totals
+
+    end = today_moscow() - timedelta(days=1)
+    start = end - timedelta(days=1)
+    for day, spend in ((start, 10), (end, 15)):
+        await runtime.checks.repository.save_dimension_page(
+            client.id,
+            day,
+            "search",
+            0,
+            [
+                BreakdownRow(
+                    id="query",
+                    name="купить товар",
+                    totals=Totals(spend=spend, impressions=100, clicks=10, conversions=1),
+                )
+            ],
+            last_page=True,
+        )
+    report = await runtime.checks.breakdown(client, DateRange(start=start, end=end), "search")
+    assert report.rows[0].totals.spend == 25
+    assert report.rows[0].totals.impressions == 200
+    assert report.status.value == "ok"
+
+
+async def test_dimension_warehouse_continues_from_saved_page(runtime, client):
+    from app.domain.reports import BreakdownRow, Totals
+
+    day = today_moscow() - timedelta(days=1)
+    await runtime.checks.repository.save_dimension_page(
+        client.id,
+        day,
+        "device",
+        0,
+        [BreakdownRow(id="desktop", name="DESKTOP", totals=Totals(spend=10))],
+        last_page=False,
+    )
+    result = await runtime.checks.warm_dimension_next(123456789, days=1)
+    assert result[:4] == (client.id, day, "device", 1)
+    report = await runtime.checks.breakdown(client, DateRange(start=day, end=day), "device")
+    assert report.rows[0].name == "DESKTOP"
+
+
 async def test_conversation_context_survives_new_agent_service(runtime):
     from app.agent.service import AgentService
 

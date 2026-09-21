@@ -4,12 +4,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
 
-from app.analytics.metrics import calculate, change, compare
+from app.analytics.metrics import aggregate, calculate, change, compare
 from app.analytics.periods import DateRange, today_moscow
 from app.analytics.progress import stage
 from app.analytics.rules import evaluate, tracking_health
 from app.analytics.warehouse import combine_daily
 from app.domain.reports import (
+    BreakdownRow,
     CheckMode,
     ClientReport,
     DataStatus,
@@ -23,6 +24,7 @@ from app.domain.reports import (
 from app.reporting.formatter import compact, detailed
 
 logger = logging.getLogger(__name__)
+WAREHOUSE_DIMENSIONS = ("device", "geo", "search", "placement")
 
 
 def snapshot_metrics(snapshot, *, healthy=True):
@@ -130,6 +132,89 @@ class CheckService:
                     return client.id, day
         return None
 
+    async def warm_dimension_next(self, chat_id, days=30):
+        clients = self.registry.visible(chat_id)
+        if not clients:
+            return None
+        yesterday = today_moscow() - timedelta(days=1)
+        oldest = yesterday - timedelta(days=days - 1)
+        progress = await self.repository.dimension_progress(
+            [client.id for client in clients], oldest, yesterday, WAREHOUSE_DIMENSIONS
+        )
+        async with self.schedule_semaphore:
+            for offset in range(days):
+                day = yesterday - timedelta(days=offset)
+                period = DateRange(start=day, end=day)
+                for client in clients:
+                    for dimension in WAREHOUSE_DIMENSIONS:
+                        item = progress.get((client.id, str(day), dimension))
+                        if item:
+                            pages = item["pages"]
+                            last = item["last"]
+                            if last is not None and pages == set(range(last + 1)):
+                                continue
+                            page = next(
+                                (value for value in range(max(pages) + 2) if value not in pages),
+                                0,
+                            )
+                        else:
+                            page = 0
+                        if page >= 100:
+                            continue
+                        logger.info(
+                            "Dimension warehouse warm client=%s day=%s dimension=%s page=%s",
+                            client.id,
+                            day,
+                            dimension,
+                            page + 1,
+                        )
+                        rows, complete = await self.provider.breakdown_page(
+                            client, period, dimension, page
+                        )
+                        await self.repository.save_dimension_page(
+                            client.id,
+                            day,
+                            dimension,
+                            page,
+                            rows,
+                            last_page=complete,
+                        )
+                        return client.id, day, dimension, page, complete
+        return None
+
+    async def breakdown(self, client, period, dimension):
+        stored = await self.repository.dimension(client.id, period, dimension)
+        if stored is not None:
+            logger.info(
+                "Dimension warehouse hit client=%s period=%s..%s dimension=%s",
+                client.id,
+                period.start,
+                period.end,
+                dimension,
+            )
+            by_id = {}
+            for value in stored["rows"]:
+                row = BreakdownRow.model_validate(value)
+                item = by_id.setdefault(row.id, {"name": row.name, "totals": []})
+                item["totals"].append(row.totals)
+            rows = [
+                BreakdownRow(id=id_, name=value["name"], totals=aggregate(value["totals"]))
+                for id_, value in by_id.items()
+            ]
+            return DirectData(
+                status=DataStatus.OK if rows else DataStatus.EMPTY,
+                period=period,
+                rows=rows,
+                totals=aggregate([row.totals for row in rows]),
+                limitations=[
+                    "Все страницы разреза сохранены; для интерактивного анализа взяты "
+                    "500 строк с наибольшим расходом за каждый день."
+                ]
+                if stored["truncated"]
+                else [],
+            )
+        return await self.provider.breakdown(client, period, dimension)
+
     async def analyze(self, client, period, mode):
         logger.info("Check queued client=%s mode=%s", client.id, mode)
         async with self.semaphore:
@@ -235,8 +320,8 @@ class CheckService:
                     try:
                         async with asyncio.timeout(90):
                             cur, prev = await asyncio.gather(
-                                self.provider.breakdown(client, period.current, dim),
-                                self.provider.breakdown(client, period.previous, dim),
+                                self.breakdown(client, period.current, dim),
+                                self.breakdown(client, period.previous, dim),
                             )
                     except TimeoutError:
                         cur = DirectData(

@@ -45,6 +45,16 @@ class DailySchedule:
                 coalesce=True,
                 max_instances=1,
             )
+            self.scheduler.add_job(
+                self.warm_dimensions,
+                "interval",
+                seconds=self.settings.warehouse_interval_seconds,
+                id="dimension_warehouse_warm",
+                next_run_time=datetime.now(MOSCOW)
+                + timedelta(seconds=max(30, self.settings.warehouse_interval_seconds // 2)),
+                coalesce=True,
+                max_instances=1,
+            )
         if not self.settings.schedule_enabled:
             self.scheduler.start()
             return
@@ -91,6 +101,27 @@ class DailySchedule:
                 logger.info("Warehouse item completed client=%s day=%s", *result)
         except Exception as exc:
             logger.warning("Warehouse item failed (%s); it will be retried", type(exc).__name__)
+
+    async def warm_dimensions(self):
+        try:
+            result = await self.checks.warm_dimension_next(
+                self.settings.telegram_report_chat_id,
+                self.settings.warehouse_backfill_days,
+            )
+            if result:
+                logger.info(
+                    "Dimension warehouse item completed client=%s day=%s dimension=%s page=%s complete=%s",
+                    result[0],
+                    result[1],
+                    result[2],
+                    result[3] + 1,
+                    result[4],
+                )
+        except Exception as exc:
+            logger.warning(
+                "Dimension warehouse item failed (%s); it will be retried",
+                type(exc).__name__,
+            )
 
     async def catch_up(self):
         now = datetime.now(MOSCOW)

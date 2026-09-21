@@ -17,6 +17,7 @@ class AnalyticsProvider(Protocol):
 
     async def snapshot(self, client, period, *, quick=False) -> Snapshot: ...
     async def breakdown(self, client, period, dimension="campaign") -> DirectData: ...
+    async def breakdown_page(self, client, period, dimension, page): ...
 
 
 def error_code(exc):
@@ -39,6 +40,19 @@ class ProductionProvider:
             return DirectData(
                 status=DataStatus.UNAVAILABLE, period=period, limitations=[error_code(exc)]
             )
+
+    async def breakdown_page(self, client, period, dimension, page):
+        try:
+            return await self.direct.breakdown_page(client, period, dimension, page)
+        except Exception as exc:
+            logger.warning(
+                "Direct dimension page failed client=%s dimension=%s page=%s error=%s",
+                client.id,
+                dimension,
+                page,
+                error_code(exc),
+            )
+            raise
 
     async def snapshot(self, client, period, *, quick=False):
         stage(f"{client.name}: ожидаю отчёт Директа")

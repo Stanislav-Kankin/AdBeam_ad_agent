@@ -106,6 +106,12 @@ class MockProvider:
             campaigns_status=DataStatus.OK,
         )
 
+    async def breakdown_page(self, client, period, dimension, page):
+        if page:
+            return [], True
+        report = await self.breakdown(client, period, dimension)
+        return report.rows, True
+
     async def snapshot(self, client, period, *, quick=False):
         direct = await self.breakdown(client, period)
         missing = client.mock_scenario == "unavailable"
