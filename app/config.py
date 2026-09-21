@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     warehouse_enabled: bool = True
     warehouse_backfill_days: int = Field(default=30, ge=1, le=365)
     warehouse_interval_seconds: int = Field(default=120, ge=30, le=3600)
+    warehouse_dimension_interval_seconds: int = Field(default=30, ge=30, le=3600)
     deepseek_daily_limit: int = Field(default=100, ge=1, le=10000)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 

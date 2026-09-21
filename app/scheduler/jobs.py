@@ -48,10 +48,10 @@ class DailySchedule:
             self.scheduler.add_job(
                 self.warm_dimensions,
                 "interval",
-                seconds=self.settings.warehouse_interval_seconds,
+                seconds=self.settings.warehouse_dimension_interval_seconds,
                 id="dimension_warehouse_warm",
                 next_run_time=datetime.now(MOSCOW)
-                + timedelta(seconds=max(30, self.settings.warehouse_interval_seconds // 2)),
+                + timedelta(seconds=self.settings.warehouse_dimension_interval_seconds),
                 coalesce=True,
                 max_instances=1,
             )
