@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 
 from app.integrations.http import ReadTransport
 from app.integrations.inventory import MetricaInventory
@@ -84,3 +85,32 @@ async def test_inventory_can_select_unlinked_accessible_counter(runtime, client,
         await service.refresh_client(client, refresh=True)
         configured = await service.select_counters(client, [7], user_id=1)
     assert configured.metrica.selected_counter_ids() == [7]
+
+
+async def test_inventory_rejects_new_forbidden_counter_but_allows_removal(
+    runtime, client, monkeypatch
+):
+    monkeypatch.setenv("DIRECT_OAUTH_TOKEN", "synthetic")
+    monkeypatch.setenv("METRICA_OAUTH_TOKEN", "synthetic")
+    client.metrica.counter_id = None
+    client.metrica.counter_ids = []
+
+    def respond(request):
+        if request.url.host == "api.direct.yandex.com":
+            return httpx.Response(
+                200,
+                json={"result": {"Campaigns": [{"TextCampaign": {"CounterIds": {"Items": [6]}}}]}},
+            )
+        return httpx.Response(200, json={"rows": 0, "counters": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        service = MetricaInventory(ReadTransport(http), runtime.checks.repository, runtime.registry)
+        await service.refresh_client(client, refresh=True)
+        with pytest.raises(PermissionError, match="недоступен"):
+            await service.select_counters(client, [6], user_id=1)
+
+        client.metrica.counter_ids = [6]
+        await service.refresh_client(client)
+        configured = await service.select_counters(client, [], user_id=1)
+
+    assert configured.metrica.selected_counter_ids() == []

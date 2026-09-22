@@ -232,10 +232,10 @@ def install_menu(router, runtime, launch, launch_chart):
             text += f"\nСтраница {page + 1} из {pages}\n✅ выбран · 🔗 связан · ⛔ нет доступа"
             for counter in counters[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]:
                 marker = (
-                    "✅"
-                    if counter["selected"]
-                    else "⛔"
+                    "⛔"
                     if counter["status"] != "ok"
+                    else "✅"
+                    if counter["selected"]
                     else "🔗"
                     if counter["linked"]
                     else "▫️"
@@ -243,7 +243,11 @@ def install_menu(router, runtime, launch, launch_chart):
                 label = f"{marker} {counter['name'] or counter['site'] or counter['id']} · {counter['id']}"
                 row(
                     label[:100],
-                    "toggle_counter",
+                    (
+                        "toggle_counter"
+                        if counter["status"] == "ok" or counter["selected"]
+                        else "counter_unavailable"
+                    ),
                     client_id=client_id,
                     counter_id=counter["id"],
                     page=page,
@@ -396,6 +400,7 @@ def install_menu(router, runtime, launch, launch_chart):
                     "refresh_data",
                     "counters",
                     "toggle_counter",
+                    "counter_unavailable",
                     "goals",
                     "toggle_goal",
                 )
@@ -467,6 +472,14 @@ def install_menu(router, runtime, launch, launch_chart):
 
             if not runtime.jobs.start((chat, user), work, failed):
                 await callback.message.answer("Запрос уже выполняется. Попробуйте позже.")
+        elif action == "counter_unavailable":
+            await callback.message.answer(
+                f"Счётчик {kwargs['counter_id']} указан в кампаниях Директа, но текущий "
+                "METRICA_OAUTH_TOKEN его не видит. Доступ к Директу не даёт доступ к "
+                "Метрике автоматически. Владелец счётчика должен выдать аккаунту токена "
+                "гостевой доступ на просмотр или редактирование, затем нажмите "
+                "«Обновить доступы»."
+            )
         elif action == "toggle_counter":
             client = runtime.registry.require(chat, kwargs["client_id"])
             counters = await runtime.checks.repository.client_counters(client.id, include_all=True)

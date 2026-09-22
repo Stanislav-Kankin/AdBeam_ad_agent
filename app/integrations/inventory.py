@@ -135,7 +135,9 @@ class MetricaInventory:
         available = {row["id"] for row in catalog if row["status"] == "ok"}
         before = {row["id"] for row in catalog if row["selected"]}
         selected = list(dict.fromkeys(int(value) for value in counter_ids))
-        if any(value not in available for value in selected):
+        # Access can be revoked after a counter was selected. Permit removing a
+        # stale selection, but never allow a newly selected inaccessible counter.
+        if any(value not in available for value in set(selected) - before):
             raise PermissionError("Счётчик недоступен текущему токену Метрики.")
         updated = await self.repository.save_client_preferences(
             client, counter_ids=selected, user_id=user_id
