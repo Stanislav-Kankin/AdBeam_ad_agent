@@ -15,7 +15,7 @@ from app.bot.commands import HELP, parse_command
 from app.bot.markdown import markdown_parts
 from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
-from app.bot.report_message import ReportMessage, report_entities
+from app.bot.report_message import ReportMessage, report_entities, retry_telegram
 from app.domain.reports import CheckMode, TriggerSource
 from app.reporting.charts import render_dynamics
 from app.reporting.formatter import split_message
@@ -83,18 +83,30 @@ def build_dispatcher(runtime):
 
     async def send_chart(message, client, period, data=None):
         current, previous = data or await runtime.checks.dynamics(client, period)
-        if any(result.status.value not in ("ok", "no_data") for result in (current, previous)):
+        usable = all(
+            result.status.value in ("ok", "no_data")
+            or (result.status.value == "insufficient" and bool(result.rows))
+            for result in (current, previous)
+        )
+        if not usable:
             return False
         label = client_label(client)
         image = await asyncio.to_thread(render_dynamics, label, period, current, previous)
-        await message.bot.send_photo(
-            message.chat.id,
-            BufferedInputFile(image, filename="adbeam-dynamics.png"),
-            caption=(
-                f"📈 {label} · {period.current.label()}\n"
-                f"Сравнение: {period.previous.label()}\n"
-                "Сплошная линия — текущий период; пунктир — предыдущий. Источник: Директ."
-            ),
+        partial = any(result.status.value == "insufficient" for result in (current, previous))
+        caption = (
+            f"📈 {label} · {period.current.label()}\n"
+            f"Сравнение: {period.previous.label()}\n"
+            "Сплошная линия — текущий период; пунктир — предыдущий. Источник: Директ."
+        )
+        if partial:
+            caption += "\n⚠️ Часть дневных данных ограничена ответом Директа."
+        await retry_telegram(
+            lambda: message.bot.send_photo(
+                message.chat.id,
+                BufferedInputFile(image, filename="adbeam-dynamics.png"),
+                caption=caption,
+                request_timeout=30,
+            )
         )
         return True
 
@@ -375,9 +387,17 @@ def build_dispatcher(runtime):
                                 message.chat.id, context["active_client_id"]
                             )
                             period = AnalysisPeriod.model_validate(context["period"])
-                            await send_chart(message, client, period)
+                            if not await send_chart(message, client, period):
+                                await message.answer(
+                                    "Текстовый анализ готов, но Директ не вернул дневные "
+                                    "данные для графика за весь выбранный период."
+                                )
                         except Exception:
                             logger.exception("Question chart failed")
+                            await message.answer(
+                                "Текстовый анализ готов, но график не удалось сформировать "
+                                "или отправить. Ошибка записана в журнал."
+                            )
             except Exception:
                 logger.exception("Question failed stage=%s", state["stage"])
                 raise

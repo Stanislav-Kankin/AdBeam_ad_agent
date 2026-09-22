@@ -219,10 +219,40 @@ class CheckService:
         return await self.provider.breakdown(client, period, dimension)
 
     async def dynamics(self, client, period):
+        async def load(date_range):
+            chunks = []
+            start = date_range.start
+            while start <= date_range.end:
+                end = min(start + timedelta(days=29), date_range.end)
+                chunks.append(DateRange(start=start, end=end))
+                start = end + timedelta(days=1)
+            results = []
+            for chunk in chunks:
+                results.append(await self.breakdown(client, chunk, "date"))
+            rows = [row for result in results for row in result.rows]
+            statuses = {result.status for result in results}
+            if DataStatus.UNAVAILABLE in statuses:
+                status = DataStatus.UNAVAILABLE
+            elif DataStatus.INSUFFICIENT in statuses:
+                status = DataStatus.INSUFFICIENT
+            elif rows:
+                status = DataStatus.OK
+            else:
+                status = DataStatus.EMPTY
+            return DirectData(
+                status=status,
+                period=date_range,
+                rows=rows,
+                totals=aggregate([row.totals for row in rows]),
+                limitations=list(
+                    dict.fromkeys(item for result in results for item in result.limitations)
+                ),
+            )
+
         async with self.semaphore:
             return await asyncio.gather(
-                self.breakdown(client, period.current, "date"),
-                self.breakdown(client, period.previous, "date"),
+                load(period.current),
+                load(period.previous),
             )
 
     async def analyze(self, client, period, mode):

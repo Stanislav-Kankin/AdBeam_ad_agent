@@ -1,4 +1,5 @@
 from io import BytesIO
+from unittest.mock import AsyncMock
 
 from PIL import Image
 
@@ -22,3 +23,16 @@ async def test_date_breakdown_has_one_row_per_day(runtime, client):
     assert len(result.rows) == 30
     assert result.rows[0].id == str(period.start)
     assert result.rows[-1].id == str(period.end)
+
+
+async def test_90_day_dynamics_uses_bounded_date_chunks(runtime, client):
+    original = runtime.checks.provider.breakdown
+    runtime.checks.provider.breakdown = AsyncMock(wraps=original)
+
+    current, previous = await runtime.checks.dynamics(client, make_period("90d"))
+
+    calls = runtime.checks.provider.breakdown.await_args_list
+    assert len(calls) == 6
+    assert all(call.args[1].days <= 30 and call.args[2] == "date" for call in calls)
+    assert len(current.rows) == 90
+    assert len(previous.rows) == 90
