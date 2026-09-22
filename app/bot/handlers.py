@@ -5,11 +5,12 @@ import secrets
 from time import monotonic
 
 from aiogram import Dispatcher, F, Router
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.analytics.periods import AnalysisPeriod, make_period
 from app.analytics.progress import progress_state
+from app.bot.callbacks import answer_callback
 from app.bot.commands import HELP, parse_command
 from app.bot.markdown import markdown_parts
 from app.bot.menu import install_menu
@@ -241,13 +242,17 @@ def build_dispatcher(runtime):
                 raise ValueError
             client = runtime.registry.require(chat_id, ids[i])
         except (ValueError, KeyError, PermissionError):
-            await callback.answer(
-                "Выбор устарел или предназначен другому пользователю.", show_alert=True
+            await answer_callback(
+                callback, "Выбор устарел или предназначен другому пользователю.", show_alert=True
             )
             return
         pending.pop(nonce)
-        await callback.answer()
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await answer_callback(callback)
+        try:
+            async with asyncio.timeout(3):
+                await callback.message.edit_reply_markup(reply_markup=None)
+        except (TelegramAPIError, TimeoutError) as exc:
+            logger.warning("Could not clear client selection: %s", type(exc).__name__)
         if command.name == "chart":
             await launch_chart(callback.message, user_id, client.id, command.period)
         else:

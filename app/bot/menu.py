@@ -7,6 +7,8 @@ from aiogram import F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.callbacks import answer_callback
+from app.bot.report_message import retry_telegram
 from app.domain.reports import CheckMode
 from app.reporting.data_status import describe_data
 
@@ -338,12 +340,20 @@ def install_menu(router, runtime, launch, launch_chart):
         markup = InlineKeyboardMarkup(inline_keyboard=rows)
         if edit:
             try:
-                await message.edit_text(text, reply_markup=markup, parse_mode=None)
+                await retry_telegram(
+                    lambda: message.edit_text(
+                        text, reply_markup=markup, parse_mode=None, request_timeout=7
+                    )
+                )
             except TelegramBadRequest as exc:
                 if "message is not modified" not in exc.message:
                     raise
         else:
-            await message.answer(text, reply_markup=markup, parse_mode=None)
+            await retry_telegram(
+                lambda: message.answer(
+                    text, reply_markup=markup, parse_mode=None, request_timeout=7
+                )
+            )
 
     @router.callback_query(F.data.startswith("menu:"))
     async def navigate(callback):
@@ -354,10 +364,19 @@ def install_menu(router, runtime, launch, launch_chart):
             or not callback.message
             or item[1:3] != (callback.message.chat.id, callback.from_user.id)
         ):
-            await callback.answer(
+            answered = await answer_callback(
+                callback,
                 "Меню устарело или принадлежит другому пользователю. Откройте /menu.",
                 show_alert=True,
             )
+            if not answered and callback.message:
+                await retry_telegram(
+                    lambda: callback.message.answer(
+                        "Эта кнопка больше не действует. Откройте новое меню: /menu.",
+                        parse_mode=None,
+                        request_timeout=7,
+                    )
+                )
             return
         _, chat, user, action, kwargs = item
         try:
@@ -384,10 +403,12 @@ def install_menu(router, runtime, launch, launch_chart):
             ):
                 raise PermissionError
         except (PermissionError, KeyError):
-            await callback.answer("Доступ больше не разрешён. Откройте /menu.", show_alert=True)
+            await answer_callback(
+                callback, "Доступ больше не разрешён. Откройте /menu.", show_alert=True
+            )
             return
         clear(chat, user)
-        await callback.answer()
+        await answer_callback(callback)
         if action == "member_add":
             awaiting_user[(chat, user)] = monotonic()
             await callback.message.answer(

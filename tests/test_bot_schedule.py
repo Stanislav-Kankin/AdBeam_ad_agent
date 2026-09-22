@@ -183,10 +183,18 @@ async def test_question_continues_when_initial_status_delivery_fails(runtime):
 
 
 @pytest.mark.parametrize("all_clients", [False, True])
-async def test_menu_report_flow_and_replay(runtime, all_clients):
+@pytest.mark.parametrize("ack_failure", [False, True])
+async def test_menu_report_flow_and_replay(runtime, all_clients, ack_failure):
     from aiogram.types import CallbackQuery
 
-    session = FakeTelegram()
+    class CallbackTimeoutTelegram(FakeTelegram):
+        async def make_request(self, bot, method, timeout=None):  # noqa: ASYNC109
+            if ack_failure and isinstance(method, AnswerCallbackQuery):
+                self.sent.append(method)
+                raise TelegramNetworkError(method=method, message="Request timeout error")
+            return await super().make_request(bot, method, timeout)
+
+    session = CallbackTimeoutTelegram()
     spy = AsyncMock(wraps=runtime.checks.run_check)
     runtime.checks.run_check = spy
     async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
@@ -215,7 +223,9 @@ async def test_menu_report_flow_and_replay(runtime, all_clients):
         await click("Краткая")
         token = session.sent[-1].reply_markup.inline_keyboard[2][0].callback_data
         await click("", user=2, data=token)
-        assert session.sent[-1].show_alert
+        assert next(
+            m for m in reversed(session.sent) if isinstance(m, AnswerCallbackQuery)
+        ).show_alert
         assert not spy.called
         await click("", data=token)
         await runtime.jobs.close()
@@ -224,8 +234,27 @@ async def test_menu_report_flow_and_replay(runtime, all_clients):
         assert spy.call_args.args[2] == "summary"
         assert len(spy.call_args.args[0]) == (3 if all_clients else 1)
         await click("", data=token)
-        assert session.sent[-1].show_alert
+        assert next(
+            m for m in reversed(session.sent) if isinstance(m, AnswerCallbackQuery)
+        ).show_alert
         assert spy.call_count == 1
+
+
+async def test_menu_command_retries_network_failure(runtime):
+    class FlakyMenuTelegram(FakeTelegram):
+        failures = 0
+
+        async def make_request(self, bot, method, timeout=None):  # noqa: ASYNC109
+            if isinstance(method, SendMessage) and self.failures == 0:
+                self.failures += 1
+                raise TelegramNetworkError(method=method, message="Request timeout error")
+            return await super().make_request(bot, method, timeout)
+
+    session = FlakyMenuTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        await build_dispatcher(runtime).feed_update(bot, message_update("/menu"))
+    assert session.failures == 1
+    assert session.sent[-1].reply_markup.inline_keyboard
 
 
 async def test_menu_pagination_and_cancel(runtime):
