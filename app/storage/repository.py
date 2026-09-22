@@ -146,6 +146,41 @@ class Repository:
             )
         return row.payload if row else None
 
+    async def cached_analysis(self, client_id, period, kind):
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(SnapshotCache).where(
+                    SnapshotCache.app_mode == self.app_mode,
+                    SnapshotCache.client_id == client_id,
+                    SnapshotCache.period_start == str(period.start),
+                    SnapshotCache.period_end == str(period.end),
+                    SnapshotCache.quality == kind,
+                    SnapshotCache.expires_at > datetime.now(UTC),
+                )
+            )
+        return row.payload if row else None
+
+    async def save_analysis(self, client_id, period, kind, payload, *, ttl_hours=12):
+        key = (self.app_mode, client_id, str(period.start), str(period.end), kind)
+        captured = datetime.now(UTC)
+        async with self.sessions.begin() as session:
+            row = await session.get(SnapshotCache, key)
+            if row is None:
+                row = SnapshotCache(
+                    app_mode=key[0],
+                    client_id=key[1],
+                    period_start=key[2],
+                    period_end=key[3],
+                    quality=key[4],
+                    payload={},
+                    expires_at=captured,
+                )
+                session.add(row)
+            row.payload = safe_json(payload)
+            row.complete = True
+            row.captured_at = captured
+            row.expires_at = captured + timedelta(hours=ttl_hours)
+
     async def daily_snapshots(self, client_id, period, *, quick=False):
         qualities = ["full", "quick"] if quick else ["full"]
         async with self.sessions() as session:

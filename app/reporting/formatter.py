@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from app.domain.reports import ClientReport
+from app.domain.reports import ClientReport, DirectData
 from app.security import redact
 
 ICONS = {"green": "🟢", "yellow": "🟡", "red": "🔴", "unknown": "⚪"}
@@ -25,6 +25,22 @@ STATUS_NAMES = {
     "no_problems_detected": "в выполненных проверках сигналов не обнаружено",
     "signals_detected": "обнаружены сигналы",
 }
+AUDIENCE_NAMES = {
+    "AGE_0_17": "до 18 лет",
+    "AGE_18_24": "18–24 года",
+    "AGE_25_34": "25–34 года",
+    "AGE_35_44": "35–44 года",
+    "AGE_45": "45 лет и старше",
+    "AGE_45_54": "45–54 года",
+    "AGE_55": "55 лет и старше",
+    "GENDER_FEMALE": "женщины",
+    "GENDER_MALE": "мужчины",
+    "VERY_HIGH": "доход: топ 1%",
+    "HIGH": "доход: 2–5%",
+    "ABOVE_AVERAGE": "доход: 6–10%",
+    "OTHER": "остальные уровни дохода",
+    "UNKNOWN": "не определено",
+}
 
 
 def fmt(value):
@@ -47,6 +63,84 @@ def delta_short(report, key):
         return ""
     value = Decimal(value)
     return f" ({'+' if value > 0 else ''}{fmt_short(value, money=True)}%)"
+
+
+def _metric_change(report, key, *, compact=False):
+    current = getattr(report.current, key)
+    previous = getattr(report.previous, key)
+    values = report.changes.get(key, {})
+    percent = values.get("percent")
+    absolute = values.get("absolute")
+    tolerance = Decimal(str(report.targets.get("kpi_change_tolerance_percent", 3)))
+    if percent is not None and abs(Decimal(percent)) <= tolerance:
+        return f"{fmt_short(current, money=key in ('spend', 'cpc', 'cpa'))} · стабильно"
+    if absolute is None:
+        return f"сейчас {fmt_short(current)}; раньше {fmt_short(previous)}"
+    absolute = Decimal(absolute)
+    sign = "+" if absolute > 0 else ""
+    unit = (
+        " ₽" if key in ("spend", "cpc", "cpa") else " п.п." if key in ("ctr", "cr", "drr") else ""
+    )
+    delta = f"{sign}{fmt_short(absolute, money=key in ('spend', 'cpc', 'cpa'))}{unit}"
+    if percent is not None:
+        delta += f" ({'+' if Decimal(percent) > 0 else ''}{fmt_short(percent, money=True)}%)"
+    if compact:
+        return delta
+    return (
+        delta
+        + f"\n  сейчас {fmt_short(current, money=key in ('spend', 'cpc', 'cpa'))}; "
+        + f"раньше {fmt_short(previous, money=key in ('spend', 'cpc', 'cpa'))}"
+    )
+
+
+def brief(report: ClientReport) -> str:
+    """Two-paragraph overview for the first response in a conversation."""
+    status = {
+        "green": "ситуация стабильна",
+        "yellow": "нужно внимание",
+        "red": "есть критичный сигнал",
+        "unknown": "оценка ограничена данными",
+    }.get(report.level, "статус не определён")
+    kpi = (
+        "drr"
+        if report.targets.get("target_drr") and report.current.drr is not None
+        else "cpa"
+        if report.targets.get("target_cpa") and report.current.cpa is not None
+        else "conversions"
+        if report.current.conversions is not None
+        else "spend"
+    )
+    first = (
+        ("🧪 MOCK — тестовые данные\n" if report.mock else "")
+        + f"{ICONS.get(report.level, '⚪')} {report.client_name}: {status}. "
+        f"Период {report.period.current.label()} против {report.period.previous.label()}. "
+        f"Главный KPI — {METRIC_NAMES[kpi]}: {_metric_change(report, kpi, compact=True)}."
+    )
+    target = report.targets.get("target_cpa" if kpi == "cpa" else "target_drr")
+    if target is not None:
+        unit = " ₽" if kpi == "cpa" else "%"
+        first = first[:-1] + f" при цели {fmt_short(target, money=kpi == 'cpa')}{unit}."
+    useful = [signal for signal in report.signals if signal.type != "tracking"]
+    status_signal = next(
+        (signal for signal in report.signals if signal.level in ("red", "yellow")), None
+    )
+    fact = (
+        status_signal.message
+        if report.level in ("red", "yellow") and status_signal
+        else useful[0].message
+        if useful
+        else "Значимых отклонений по доступным данным нет."
+    )
+    action = next((signal.next_check for signal in report.signals if signal.next_check), None)
+    if not action:
+        action = "Продолжить наблюдение за целевым KPI."
+    spend = (
+        f"Расход: {fmt(report.current.spend)} ₽{delta_short(report, 'spend')}. "
+        if report.current.spend is not None
+        else ""
+    )
+    second = spend + f"Что изменилось: {fact} Что проверить: {action}"
+    return redact(first + "\n\n" + second)
 
 
 def has_signal(report, type_):
@@ -82,6 +176,8 @@ def daily_digest(results):
     _, reports, period, active, inactive, broken = weekly
     meaningful = {
         "cpa_high",
+        "cpa_above_target",
+        "cpa_change",
         "cr_drop",
         "cpc_change",
         "budget_pacing",
@@ -90,12 +186,7 @@ def daily_digest(results):
         "campaign_without_conversions",
         "device_cr_drop",
     }
-    attention = [
-        report
-        for report in active
-        if any(signal.type in meaningful for signal in report.signals)
-        or has_signal(report, "campaign_states")
-    ]
+    attention = [report for report in active if report.level in ("red", "yellow")]
     attention.sort(
         key=lambda report: (
             0 if report.level == "red" else 1,
@@ -169,7 +260,7 @@ def daily_digest(results):
 
 
 def executive(report: ClientReport) -> str:
-    """Decision-oriented single-client report; diagnostics stay in ``detailed``."""
+    """Structured specialist report; raw diagnostics stay in ``detailed``."""
     direct = report.source_status.get("Директ")
     useful = [signal for signal in report.signals if signal.type != "tracking"]
     lines = [
@@ -177,7 +268,16 @@ def executive(report: ClientReport) -> str:
         f"{ICONS.get(report.level, '⚪')} {report.client_name}",
         f"{report.period.current.label()} против {report.period.previous.label()}",
         "",
-        "Главный вывод:",
+        "Статус: "
+        + {
+            "green": "ситуация стабильна",
+            "yellow": "нужно внимание",
+            "red": "есть критичный сигнал",
+            "unknown": "оценка ограничена данными",
+        }.get(report.level, "не определён")
+        + ".",
+        "",
+        "Основное изменение:",
     ]
     if direct == "no_data":
         lines.append("За выбранный период Директ не вернул рекламную статистику.")
@@ -204,17 +304,9 @@ def executive(report: ClientReport) -> str:
         if getattr(report.current, key) is not None or getattr(report.previous, key) is not None
     ][:5]
     if metrics:
-        lines += ["", "Ключевые показатели:"]
+        lines += ["", "Динамика показателей:"]
     for key in metrics:
-        current = fmt_short(getattr(report.current, key), money=key in ("spend", "cpc", "cpa"))
-        previous = fmt_short(getattr(report.previous, key), money=key in ("spend", "cpc", "cpa"))
-        delta = report.changes.get(key, {}).get("percent")
-        suffix = (
-            f" · {'+' if Decimal(delta) > 0 else ''}{fmt_short(delta, money=True)}%"
-            if delta is not None
-            else ""
-        )
-        lines.append(f"• {METRIC_NAMES[key]}: {current} / {previous}{suffix}")
+        lines.append(f"{METRIC_NAMES[key]}: {_metric_change(report, key)}")
 
     if report.drivers and report.current.spend is not None:
         lines += ["", "Наибольший вклад в изменение расхода:"]
@@ -252,6 +344,57 @@ def executive(report: ClientReport) -> str:
         + source_text
         + (f"; технических ограничений: {limitations}" if limitations else "."),
     ]
+    return redact("\n".join(lines))
+
+
+def audience_report(client_name, payload) -> str:
+    period = payload["period"]
+    lines = [
+        f"👥 Аудитория · {client_name}",
+        f"Период: {period['start']}–{period['end']}",
+        "",
+        "Рекламный трафик Директа:",
+    ]
+    labels = {"age": "Возраст", "gender": "Пол", "income": "Доход"}
+    for key in ("age", "gender", "income"):
+        report = DirectData.model_validate(payload["direct"][key])
+        rows = [row for row in report.rows if (row.totals.clicks or 0) > 0]
+        total = sum(row.totals.clicks or 0 for row in rows)
+        lines.append(f"{labels[key]}:")
+        if not rows or not total:
+            lines.append("• нет данных")
+            continue
+        for row in sorted(rows, key=lambda item: item.totals.clicks or 0, reverse=True)[:5]:
+            share = Decimal(row.totals.clicks or 0) / Decimal(total) * 100
+            cpa = (
+                row.totals.spend / row.totals.conversions
+                if row.totals.spend is not None and (row.totals.conversions or 0) > 0
+                else None
+            )
+            suffix = f"; CPA {fmt_short(cpa, money=True)} ₽" if cpa is not None else ""
+            lines.append(
+                f"• {AUDIENCE_NAMES.get(row.name, row.name)}: "
+                f"{fmt_short(share, money=True)}% кликов{suffix}"
+            )
+
+    interests = payload.get("interests", {})
+    lines += ["", "Долгосрочные интересы аудитории сайта (Метрика):"]
+    if interests.get("rows"):
+        for row in interests["rows"][:7]:
+            lines.append(
+                f"• {row['name']}: аффинити {fmt_short(row.get('affinity'), money=True)}; "
+                f"пользователи {fmt_short(row.get('users'))}"
+            )
+    else:
+        lines.append("• данные не получены")
+    lines += [
+        "",
+        "Важно: возраст, пол и доход относятся к рекламе клиента в Директе; "
+        "интересы — ко всему трафику выбранных счётчиков Метрики.",
+    ]
+    limitations = interests.get("limitations") or []
+    if limitations:
+        lines.append(f"Ограничения: {len(limitations)}. Подробности сохранены в диагностике.")
     return redact("\n".join(lines))
 
 

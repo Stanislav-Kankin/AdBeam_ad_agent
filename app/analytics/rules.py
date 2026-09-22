@@ -129,6 +129,38 @@ def evaluate(
                 "CPA рассчитан по основным целям; превышен настроенный порог.",
                 "Проверить кампании с максимальным вкладом в расход и падение конверсий.",
             )
+        elif excess > Decimal(str(targets.kpi_change_tolerance_percent)):
+            add(
+                "cpa_above_target",
+                "yellow",
+                "CPA выше целевого уровня.",
+                {
+                    "cpa": current.cpa,
+                    "target_cpa": targets.target_cpa,
+                    "excess_percent": excess,
+                },
+                "CPA выше цели, но не достиг критического порога.",
+                "Проверить кампании с наибольшей стоимостью основной конверсии.",
+            )
+        cpa_delta = change(current.cpa, previous.cpa)["percent"]
+        if (
+            cpa_delta is not None
+            and cpa_delta > Decimal(str(targets.kpi_change_tolerance_percent))
+            and excess <= Decimal(str(targets.kpi_change_tolerance_percent))
+        ):
+            add(
+                "cpa_change",
+                "yellow",
+                "CPA вырос относительно прошлого периода.",
+                {
+                    "current": current.cpa,
+                    "previous": previous.cpa,
+                    "percent": cpa_delta,
+                    "tolerance_percent": targets.kpi_change_tolerance_percent,
+                },
+                "Изменение CPA превысило настроенный порог статистического шума.",
+                "Проверить кампании с наибольшим ростом расхода и стоимости конверсии.",
+            )
     cpc_delta = change(current.cpc, previous.cpc)["percent"]
     if (
         enough

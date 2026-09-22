@@ -1,6 +1,6 @@
 from app.analytics.periods import make_period
 from app.domain.reports import CheckMode, TriggerSource
-from app.reporting.formatter import compact, detailed, executive
+from app.reporting.formatter import audience_report, brief, compact, detailed, executive
 
 
 async def test_single_client_report_separates_decisions_from_diagnostics(runtime, client):
@@ -15,12 +15,16 @@ async def test_single_client_report_separates_decisions_from_diagnostics(runtime
     main = executive(report)
     technical = detailed(report)
 
-    assert "Главный вывод:" in main
-    assert "Ключевые показатели:" in main
+    assert "Основное изменение:" in main
+    assert "Динамика показателей:" in main
     assert "Что сделать:" in main
     assert "Полнота данных:" in main
     assert "HTTP 429" not in main
     assert "HTTP 429" in technical
+
+    overview = brief(report)
+    assert len(overview.split("\n\n")) == 2
+    assert len(overview) < 1000
 
 
 async def test_portfolio_report_is_ranked_and_bounded(runtime):
@@ -57,3 +61,21 @@ async def test_latest_run_can_feed_technical_details(runtime, client):
     assert latest is not None
     assert latest["status"] == "completed"
     assert latest["reports"][0]["client_id"] == reports[0].client_id
+
+
+async def test_audience_breakdown_is_readable_and_cached(runtime, client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    period = make_period("14d")
+    spy = AsyncMock(wraps=runtime.checks.provider.breakdown)
+    monkeypatch.setattr(runtime.checks.provider, "breakdown", spy)
+
+    first = await runtime.checks.audience(client, period)
+    second = await runtime.checks.audience(client, period)
+    text = audience_report(client.name, first)
+
+    assert first == second
+    assert spy.await_count == 3
+    assert "Возраст:" in text and "Пол:" in text and "Доход:" in text
+    assert "Долгосрочные интересы" in text
+    assert "аффинити" in text

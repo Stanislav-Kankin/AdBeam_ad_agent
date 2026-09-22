@@ -83,6 +83,64 @@ class MetricaAdapter:
             raise IntegrationError("metrica", "missing_metrics")
         return data
 
+    async def audience_interests(self, client, period):
+        counters = client.metrica.selected_counter_ids()
+        if not counters:
+            counters = await campaign_counters(self.transport, client)
+        rows, limitations = [], []
+        for counter_id in counters[:3]:
+            data = await self.transport.json(
+                "metrica",
+                "GET",
+                BASE_URL + "/stat/v1/data",
+                headers=self.headers(client),
+                params={
+                    "ids": counter_id,
+                    "date1": str(period.start),
+                    "date2": str(period.end),
+                    "preset": "interests2",
+                    "dimensions": "ym:s:interest2d1,ym:s:interest2d2,ym:s:interest2d3",
+                    "metrics": "ym:s:visits,ym:s:users,ym:s:affinityIndexInterests2",
+                    "sort": "-ym:s:affinityIndexInterests2",
+                    "accuracy": "full",
+                    "lang": "ru",
+                    "limit": 20,
+                },
+            )
+            if data.get("contains_sensitive_data"):
+                limitations.append(
+                    f"Счётчик {counter_id}: часть аудиторных данных скрыта правилами обезличивания."
+                )
+            for item in data.get("data", []):
+                dimensions = [
+                    str(value.get("name") or value.get("id") or "").strip()
+                    for value in item.get("dimensions", [])
+                    if isinstance(value, dict)
+                ]
+                metrics = item.get("metrics", [])
+                if not any(dimensions) or len(metrics) < 3:
+                    continue
+                rows.append(
+                    {
+                        "counter_id": counter_id,
+                        "name": " → ".join(value for value in dimensions if value),
+                        "visits": number(metrics[0]),
+                        "users": number(metrics[1]),
+                        "affinity": number(metrics[2]),
+                    }
+                )
+        if len(counters) > 3:
+            limitations.append(
+                f"Показаны интересы первых трёх из {len(counters)} связанных счётчиков."
+            )
+        rows.sort(key=lambda item: item.get("affinity") or 0, reverse=True)
+        return {
+            "status": "ok" if rows else "no_data",
+            "scope": "site_counter",
+            "rows": rows[:20],
+            "limitations": limitations,
+        }
+
     async def overview(self, client, period, campaign_ids, *, budget=165):
         deadline = monotonic() + budget
         configured = client.metrica.selected_counter_ids()

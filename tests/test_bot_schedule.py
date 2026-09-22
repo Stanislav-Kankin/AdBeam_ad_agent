@@ -168,7 +168,10 @@ async def test_single_client_check_offers_on_demand_technical_details(runtime):
             for item in session.sent
             if isinstance(item, SendMessage) and item.text == "Дополнительные данные"
         )
-        data = offer.reply_markup.inline_keyboard[0][0].callback_data
+        assert offer.reply_markup.inline_keyboard[0][0].text == "📈 Показатели и причины"
+        assert offer.reply_markup.inline_keyboard[1][0].text == "👥 Аудитория"
+        assert offer.reply_markup.inline_keyboard[2][0].text == "⚙️ Технические данные"
+        data = offer.reply_markup.inline_keyboard[2][0].callback_data
         callback = CallbackQuery(
             id="details",
             from_user=User(id=1, is_bot=False, first_name="User"),
@@ -178,12 +181,31 @@ async def test_single_client_check_offers_on_demand_technical_details(runtime):
         )
         before = len(session.sent)
         await dp.feed_update(bot, Update(update_id=2, callback_query=callback))
+        audience_data = offer.reply_markup.inline_keyboard[1][0].callback_data
+        audience_before = len(session.sent)
+        await dp.feed_update(
+            bot,
+            Update(
+                update_id=3,
+                callback_query=callback.model_copy(
+                    update={"id": "audience", "data": audience_data}
+                ),
+            ),
+        )
+        await runtime.jobs.close()
 
     details = "\n".join(
         item.text for item in session.sent[before:] if isinstance(item, SendMessage) and item.text
     )
     assert "Ключевые показатели:" in details
     assert "Следующий шаг:" in details
+    audience = "\n".join(
+        item.text
+        for item in session.sent[audience_before:]
+        if isinstance(item, (SendMessage, EditMessageText)) and item.text
+    )
+    assert "Аудитория" in audience
+    assert "Рекламный трафик Директа:" in audience
 
 
 async def test_unknown_chats_silent(runtime):

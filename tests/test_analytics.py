@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.analytics.diagnostics import snapshot_metrics
+from app.analytics.diagnostics import report_level, snapshot_metrics
 from app.analytics.metrics import aggregate, calculate, change, expected_budget
 from app.analytics.periods import MOSCOW, AnalysisPeriod, DateRange, make_period
 from app.analytics.rules import evaluate, tracking_health
@@ -89,6 +89,19 @@ async def test_mock_scenarios_and_standard_checks(runtime):
     assert any(s.type == "campaign_without_conversions" for s in west.signals)
     assert west.checks["устройства"] == "ok"
     assert reports[1].current.drr is None
+
+
+async def test_stable_target_cpa_keeps_contextual_changes_green(runtime):
+    client = runtime.registry.clients["grand_line"]
+    report = await runtime.checks.analyze(client, make_period(), CheckMode.STANDARD)
+    contextual = [
+        signal for signal in report.signals if signal.type in ("spend_change", "cpc_change")
+    ]
+    current = report.current.model_copy(update={"cpa": Decimal("1002")})
+    previous = report.previous.model_copy(update={"cpa": Decimal("1000")})
+
+    assert report_level(client, contextual, current, previous, reliable=True) == "green"
+    assert report_level(client, report.signals, report.current, report.previous, True) == "yellow"
 
 
 async def test_mock_overlapping_periods_consistent(runtime, client):

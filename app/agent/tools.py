@@ -19,6 +19,7 @@ DESCRIPTIONS = {
     "get_geo_breakdown": "Агрегированные показатели по регионам (ID регионов Директа).",
     "get_search_queries": "Топ поисковых запросов по расходу, клики и основные конверсии; контакты маскируются.",
     "get_placements": "Топ площадок РСЯ по расходу, кликам и основным конверсиям.",
+    "get_audience_breakdown": "Возраст, пол и уровень дохода рекламного трафика Директа; долгосрочные интересы аудитории сайта из Метрики.",
     "get_metrica_goals": "Доступные цели и достижения основных целей Метрики, без персональных данных.",
     "check_tracking_health": "Проверка поступления данных, наличия целей и исчезновения конверсий. Не является тестом форм на сайте.",
     "get_revenue": "Выручка из настроенного источника, её статус, период и сопоставимость.",
@@ -98,6 +99,8 @@ class ToolRegistry:
                     user_id=user_id,
                 )
                 return {**base, "reports": [r.model_dump(mode="json") for r in reports]}
+            if name == "get_audience_breakdown":
+                return {**base, "audience": await self.checks.audience(client, period)}
             if name in DIMENSIONS:
                 # Check tracking first so unavailable goals are never presented as valid CPA/CR.
                 now, before = await self.checks.snapshots(client, period)

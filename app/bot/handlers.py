@@ -18,7 +18,7 @@ from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities, retry_telegram
 from app.domain.reports import CheckMode, ClientReport, TriggerSource
 from app.reporting.charts import render_dynamics
-from app.reporting.formatter import detailed, split_message
+from app.reporting.formatter import audience_report, detailed, executive, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,10 @@ def build_dispatcher(runtime):
             monotonic(),
             message.chat.id,
             user_id,
+            executive(reports[0]),
             detailed(reports[0]),
+            reports[0].client_id,
+            reports[0].period.model_dump(mode="json"),
         )
         try:
             await retry_telegram(
@@ -91,10 +94,22 @@ def build_dispatcher(runtime):
                         inline_keyboard=[
                             [
                                 InlineKeyboardButton(
-                                    text="⚙️ Техническая расшифровка",
-                                    callback_data=f"details:{token}",
+                                    text="📈 Показатели и причины",
+                                    callback_data=f"details:{token}:specialist",
                                 )
-                            ]
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    text="👥 Аудитория",
+                                    callback_data=f"details:{token}:audience",
+                                )
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    text="⚙️ Технические данные",
+                                    callback_data=f"details:{token}:technical",
+                                )
+                            ],
                         ]
                     ),
                     request_timeout=15,
@@ -108,12 +123,15 @@ def build_dispatcher(runtime):
     async def show_details(callback):
         expire_details()
         try:
-            _, token = callback.data.split(":", 1)
-            created, chat_id, user_id, text = report_details[token]
+            _, token, view = callback.data.split(":", 2)
+            created, chat_id, user_id, specialist, technical, client_id, period_data = (
+                report_details[token]
+            )
             if (
                 monotonic() - created > 900
                 or chat_id != callback.message.chat.id
                 or user_id != callback.from_user.id
+                or view not in ("specialist", "technical", "audience")
             ):
                 raise ValueError
         except (KeyError, ValueError):
@@ -122,6 +140,31 @@ def build_dispatcher(runtime):
             )
             return
         await answer_callback(callback)
+        if view == "audience":
+            presentation = ReportMessage(callback.message)
+
+            async def work():
+                state = {"stage": "загружаю аудиторию Директа и интересы Метрики"}
+                token = progress_state.set(state)
+                try:
+                    await presentation.start(state)
+                    client = runtime.registry.require(chat_id, client_id)
+                    period = AnalysisPeriod.model_validate(period_data)
+                    payload = await runtime.checks.audience(client, period)
+                    await presentation.finish(audience_report(client_label(client), payload))
+                finally:
+                    await presentation.stop()
+                    progress_state.reset(token)
+
+            async def failed():
+                await presentation.finish(
+                    "Не удалось загрузить аудиторные срезы. Ошибка записана в журнал."
+                )
+
+            if not runtime.jobs.start((chat_id, user_id), work, failed):
+                await callback.message.answer("Другой запрос уже выполняется. Попробуйте позже.")
+            return
+        text = specialist if view == "specialist" else technical
         await send_text(callback.message.bot, chat_id, text)
 
     def client_label(client):

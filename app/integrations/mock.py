@@ -88,6 +88,9 @@ class MockProvider:
                 "geo": ["Москва", "Санкт-Петербург"],
                 "search": ["купить товар оптом", "каталог товаров"],
                 "placement": ["example.org", "example.net"],
+                "age": ["AGE_25_34", "AGE_35_44"],
+                "gender": ["GENDER_FEMALE", "GENDER_MALE"],
+                "income": ["HIGH", "OTHER"],
             }[dimension]
             rows = [
                 row.model_copy(update={"id": f"{dimension}_{i}", "name": names[i]})
@@ -124,6 +127,17 @@ class MockProvider:
             return [], True
         report = await self.breakdown(client, period, dimension)
         return report.rows, True
+
+    async def audience_interests(self, client, period):
+        return {
+            "status": "ok",
+            "scope": "site_counter",
+            "rows": [
+                {"name": "Строительство и ремонт", "visits": 1200, "users": 900, "affinity": 185},
+                {"name": "Загородная недвижимость", "visits": 800, "users": 650, "affinity": 160},
+            ],
+            "limitations": [],
+        }
 
     async def snapshot(self, client, period, *, quick=False):
         direct = await self.breakdown(client, period)

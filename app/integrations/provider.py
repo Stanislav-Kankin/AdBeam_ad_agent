@@ -18,6 +18,7 @@ class AnalyticsProvider(Protocol):
     async def snapshot(self, client, period, *, quick=False) -> Snapshot: ...
     async def breakdown(self, client, period, dimension="campaign") -> DirectData: ...
     async def breakdown_page(self, client, period, dimension, page): ...
+    async def audience_interests(self, client, period): ...
 
 
 def error_code(exc):
@@ -53,6 +54,12 @@ class ProductionProvider:
                 error_code(exc),
             )
             raise
+
+    async def audience_interests(self, client, period):
+        try:
+            return await self.metrica.audience_interests(client, period)
+        except Exception as exc:
+            return {"rows": [], "limitations": [error_code(exc)], "status": "unavailable"}
 
     async def snapshot(self, client, period, *, quick=False):
         stage(f"{client.name}: ожидаю отчёт Директа")

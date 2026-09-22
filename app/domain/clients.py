@@ -55,6 +55,7 @@ class Targets(StrictModel):
     minimum_conversions: int = Field(default=5, ge=1)
     no_conversion_cpa_multiple: float = Field(default=2, gt=0)
     cpa_excess_percent: float = Field(default=30, gt=0)
+    kpi_change_tolerance_percent: float = Field(default=3, ge=0, le=100)
     cpc_change_percent: float = Field(default=30, gt=0)
     cr_drop_percent: float = Field(default=25, gt=0, le=100)
     spend_change_percent: float = Field(default=25, gt=0)

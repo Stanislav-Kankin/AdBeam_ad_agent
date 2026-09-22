@@ -21,6 +21,9 @@ DIMENSIONS = {
     "geo": ("CUSTOM_REPORT", ["LocationOfPresenceId"]),
     "search": ("SEARCH_QUERY_PERFORMANCE_REPORT", ["Query"]),
     "placement": ("CUSTOM_REPORT", ["Placement"]),
+    "age": ("CUSTOM_REPORT", ["Age"]),
+    "gender": ("CUSTOM_REPORT", ["Gender"]),
+    "income": ("CUSTOM_REPORT", ["IncomeGrade"]),
 }
 REPORT_PAGE_SIZE = 10000
 REPORT_MAX_PAGES = 100

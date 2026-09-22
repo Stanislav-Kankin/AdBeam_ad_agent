@@ -21,7 +21,7 @@ from app.domain.reports import (
     Totals,
     TriggerSource,
 )
-from app.reporting.formatter import compact, executive
+from app.reporting.formatter import brief, compact
 
 logger = logging.getLogger(__name__)
 WAREHOUSE_DIMENSIONS = ("device", "geo", "search", "placement")
@@ -61,6 +61,27 @@ def drivers(current, previous):
             }
         )
     return sorted(result, key=lambda r: abs(r["spend_delta"] or 0), reverse=True)
+
+
+def report_level(client, signals, current, previous, reliable):
+    if any(signal.level == "red" for signal in signals):
+        return "red"
+    cpa_delta = change(current.cpa, previous.cpa)["percent"]
+    stable_cpa = bool(
+        client.targets.target_cpa
+        and current.cpa is not None
+        and previous.cpa is not None
+        and cpa_delta is not None
+        and abs(Decimal(cpa_delta)) <= Decimal(str(client.targets.kpi_change_tolerance_percent))
+        and current.cpa
+        <= client.targets.target_cpa * (1 + Decimal(str(client.targets.cpa_excess_percent)) / 100)
+    )
+    contextual = {"campaign_states"}
+    if stable_cpa:
+        contextual.update(("spend_change", "cpc_change"))
+    if any(signal.type not in contextual for signal in signals):
+        return "yellow"
+    return "green" if reliable else "unknown"
 
 
 class CheckService:
@@ -254,6 +275,29 @@ class CheckService:
                 load(period.current),
                 load(period.previous),
             )
+
+    async def audience(self, client, period):
+        cached = await self.repository.cached_analysis(client.id, period.current, "audience")
+        if cached is not None:
+            logger.info("Audience cache hit client=%s", client.id)
+            return cached
+        age, gender, income, interests = await asyncio.gather(
+            self.breakdown(client, period.current, "age"),
+            self.breakdown(client, period.current, "gender"),
+            self.breakdown(client, period.current, "income"),
+            self.provider.audience_interests(client, period.current),
+        )
+        result = {
+            "client_id": client.id,
+            "period": period.current.model_dump(mode="json"),
+            "direct": {
+                name: value.model_dump(mode="json")
+                for name, value in (("age", age), ("gender", gender), ("income", income))
+            },
+            "interests": interests,
+        }
+        await self.repository.save_analysis(client.id, period.current, "audience", result)
+        return result
 
     async def analyze(self, client, period, mode):
         logger.info("Check queued client=%s mode=%s", client.id, mode)
@@ -467,7 +511,9 @@ class CheckService:
                 and mature
                 and all(v in ("ok", "not_checked") for v in checks.values())
             )
-            level = signals[0].level if signals else "green" if reliable else "unknown"
+            # When CPA is the configured KPI and remains stable, traffic-volume changes and
+            # currently stopped legacy campaigns stay useful context but do not color the account.
+            level = report_level(client, signals, a, b, reliable)
             return ClientReport(
                 client_id=client.id,
                 client_name=client.name,
@@ -492,6 +538,11 @@ class CheckService:
                 },
                 limitations=list(dict.fromkeys(limitations)),
                 main_goal_ids=client.metrica.main_goal_ids,
+                targets={
+                    "target_cpa": client.targets.target_cpa,
+                    "target_drr": client.targets.target_drr,
+                    "kpi_change_tolerance_percent": client.targets.kpi_change_tolerance_percent,
+                },
                 goal_scope=current.metrica.scope,
                 goal_metrics=[
                     {
@@ -562,7 +613,7 @@ class CheckService:
                     if any(v == "unavailable" for v in result.source_status.values()):
                         errors.append(f"{client.name}: один или несколько источников недоступны.")
             text = (
-                executive(reports[0])
+                brief(reports[0])
                 if len(clients) == 1 and reports and mode != CheckMode.SUMMARY
                 else compact(reports, period, errors, mode == CheckMode.SUMMARY)
             )
