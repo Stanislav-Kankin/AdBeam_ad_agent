@@ -9,7 +9,6 @@ from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
 from sqlalchemy import create_engine, inspect, select
-from test_bot_schedule import FakeTelegram, message_update
 
 from app.agent.service import AgentService
 from app.bot.handlers import build_dispatcher
@@ -19,6 +18,7 @@ from app.integrations.deepseek import LLMMessage
 from app.integrations.discovery import AccountDiscovery
 from app.integrations.http import ReadTransport
 from app.storage.models import Delivery, Run, ToolEvent
+from tests.test_bot_schedule import FakeTelegram, message_update
 
 
 @pytest.mark.parametrize(
