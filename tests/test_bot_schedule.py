@@ -155,6 +155,37 @@ async def test_telegram_commands_and_free_text_end_to_end(runtime, text):
         assert not any(isinstance(method, SendPhoto) for method in session.sent)
 
 
+async def test_single_client_check_offers_on_demand_technical_details(runtime):
+    from aiogram.types import CallbackQuery
+
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+        await dp.feed_update(bot, message_update('/check "West Экспорт" 7d'))
+        await runtime.jobs.close()
+        offer = next(
+            item
+            for item in session.sent
+            if isinstance(item, SendMessage) and item.text == "Дополнительные данные"
+        )
+        data = offer.reply_markup.inline_keyboard[0][0].callback_data
+        callback = CallbackQuery(
+            id="details",
+            from_user=User(id=1, is_bot=False, first_name="User"),
+            chat_instance="test",
+            message=message_update("details").message,
+            data=data,
+        )
+        before = len(session.sent)
+        await dp.feed_update(bot, Update(update_id=2, callback_query=callback))
+
+    details = "\n".join(
+        item.text for item in session.sent[before:] if isinstance(item, SendMessage) and item.text
+    )
+    assert "Ключевые показатели:" in details
+    assert "Следующий шаг:" in details
+
+
 async def test_unknown_chats_silent(runtime):
     session = FakeTelegram()
     async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:

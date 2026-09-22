@@ -5,7 +5,7 @@ import secrets
 from time import monotonic
 
 from aiogram import Dispatcher, F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.analytics.periods import AnalysisPeriod, make_period
@@ -16,9 +16,9 @@ from app.bot.markdown import markdown_parts
 from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities, retry_telegram
-from app.domain.reports import CheckMode, TriggerSource
+from app.domain.reports import CheckMode, ClientReport, TriggerSource
 from app.reporting.charts import render_dynamics
-from app.reporting.formatter import split_message
+from app.reporting.formatter import detailed, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +40,15 @@ async def send_text(bot, chat_id, text, *, markdown=False):
 
 
 async def send_part(bot, chat_id, text, entities=None):
-    for attempt in range(3):
-        try:
-            return await bot.send_message(
-                chat_id,
-                text,
-                parse_mode=None,
-                entities=report_entities(text) if entities is None else entities,
-            )
-        except TelegramRetryAfter as exc:
-            if attempt == 2 or exc.retry_after > 60:
-                raise
-            await asyncio.sleep(exc.retry_after)
+    return await retry_telegram(
+        lambda: bot.send_message(
+            chat_id,
+            text,
+            parse_mode=None,
+            entities=report_entities(text) if entities is None else entities,
+            request_timeout=15,
+        )
+    )
 
 
 def build_dispatcher(runtime):
@@ -66,6 +63,66 @@ def build_dispatcher(runtime):
     router.message.outer_middleware(middleware)
     router.callback_query.outer_middleware(middleware)
     pending = {}
+    report_details = {}
+
+    def expire_details():
+        expired = [key for key, value in report_details.items() if monotonic() - value[0] > 900]
+        for key in expired:
+            report_details.pop(key, None)
+
+    async def offer_details(message, reports, user_id):
+        if len(reports) != 1:
+            return
+        expire_details()
+        if len(report_details) >= 200:
+            report_details.pop(next(iter(report_details)))
+        token = secrets.token_hex(6)
+        report_details[token] = (
+            monotonic(),
+            message.chat.id,
+            user_id,
+            detailed(reports[0]),
+        )
+        try:
+            await retry_telegram(
+                lambda: message.answer(
+                    "Дополнительные данные",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="⚙️ Техническая расшифровка",
+                                    callback_data=f"details:{token}",
+                                )
+                            ]
+                        ]
+                    ),
+                    request_timeout=15,
+                )
+            )
+        except (TelegramAPIError, TimeoutError) as exc:
+            report_details.pop(token, None)
+            logger.warning("Could not offer report details: %s", type(exc).__name__)
+
+    @router.callback_query(F.data.startswith("details:"))
+    async def show_details(callback):
+        expire_details()
+        try:
+            _, token = callback.data.split(":", 1)
+            created, chat_id, user_id, text = report_details[token]
+            if (
+                monotonic() - created > 900
+                or chat_id != callback.message.chat.id
+                or user_id != callback.from_user.id
+            ):
+                raise ValueError
+        except (KeyError, ValueError):
+            await answer_callback(
+                callback, "Расшифровка устарела. Запустите проверку ещё раз.", show_alert=True
+            )
+            return
+        await answer_callback(callback)
+        await send_text(callback.message.bot, chat_id, text)
 
     def client_label(client):
         name = client.name.strip()
@@ -146,6 +203,7 @@ def build_dispatcher(runtime):
                 )
                 state["stage"] = "отправляю результат"
                 await presentation.finish(text, markdown=markdown)
+                await offer_details(message, reports, user_id)
                 if chart_task:
                     try:
                         if not await send_chart(message, client, analysis_period, await chart_task):
@@ -358,6 +416,9 @@ def build_dispatcher(runtime):
             logger.info("Question started message_id=%s", message.message_id)
             try:
                 await presentation.start(state)
+                run_before = await runtime.checks.repository.latest_run(
+                    message.chat.id, message.from_user.id
+                )
                 before = await runtime.checks.repository.conversation(
                     message.chat.id, message.from_user.id
                 )
@@ -365,6 +426,12 @@ def build_dispatcher(runtime):
                     message.text, message.chat.id, message.from_user.id
                 )
                 await presentation.finish(answer, markdown=True)
+                run_after = await runtime.checks.repository.latest_run(
+                    message.chat.id, message.from_user.id
+                )
+                if run_after and (not run_before or run_after["id"] != run_before["id"]):
+                    reports = [ClientReport.model_validate(value) for value in run_after["reports"]]
+                    await offer_details(message, reports, message.from_user.id)
                 mentioned = mentioned_clients(message.text, message.chat.id)
                 if (
                     ANALYTICS_WORDS.search(message.text)

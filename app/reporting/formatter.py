@@ -168,6 +168,93 @@ def daily_digest(results):
     return redact("\n".join(lines))
 
 
+def executive(report: ClientReport) -> str:
+    """Decision-oriented single-client report; diagnostics stay in ``detailed``."""
+    direct = report.source_status.get("Директ")
+    useful = [signal for signal in report.signals if signal.type != "tracking"]
+    lines = [
+        "🧪 MOCK — тестовые данные" if report.mock else "📊 AdBeam Performance Analyst",
+        f"{ICONS.get(report.level, '⚪')} {report.client_name}",
+        f"{report.period.current.label()} против {report.period.previous.label()}",
+        "",
+        "Главный вывод:",
+    ]
+    if direct == "no_data":
+        lines.append("За выбранный период Директ не вернул рекламную статистику.")
+    elif report.current.spend is None:
+        lines.append("Данные Директа не загрузились; это не означает нулевую активность.")
+    elif useful:
+        lines.extend(f"• {signal.message}" for signal in useful[:2])
+    else:
+        spend_delta = report.changes.get("spend", {}).get("percent")
+        if spend_delta is None:
+            lines.append("Доступные показатели получены, значимое изменение расхода не определено.")
+        else:
+            direction = "вырос" if Decimal(spend_delta) > 0 else "снизился"
+            lines.append(
+                f"Расход {direction} на {fmt_short(abs(Decimal(spend_delta)), money=True)}%."
+            )
+
+    preferred = ["spend", "conversions", "cpa", "clicks", "cpc"]
+    if report.current.conversions is None:
+        preferred = ["spend", "clicks", "cpc", "ctr", "impressions"]
+    metrics = [
+        key
+        for key in preferred
+        if getattr(report.current, key) is not None or getattr(report.previous, key) is not None
+    ][:5]
+    if metrics:
+        lines += ["", "Ключевые показатели:"]
+    for key in metrics:
+        current = fmt_short(getattr(report.current, key), money=key in ("spend", "cpc", "cpa"))
+        previous = fmt_short(getattr(report.previous, key), money=key in ("spend", "cpc", "cpa"))
+        delta = report.changes.get(key, {}).get("percent")
+        suffix = (
+            f" · {'+' if Decimal(delta) > 0 else ''}{fmt_short(delta, money=True)}%"
+            if delta is not None
+            else ""
+        )
+        lines.append(f"• {METRIC_NAMES[key]}: {current} / {previous}{suffix}")
+
+    if report.drivers and report.current.spend is not None:
+        lines += ["", "Наибольший вклад в изменение расхода:"]
+        for row in report.drivers[:3]:
+            delta = Decimal(row.get("spend_delta") or 0)
+            lines.append(
+                f"• {row['name']}: {'+' if delta > 0 else ''}{fmt_short(delta, money=True)} ₽"
+            )
+
+    actions = []
+    actions.extend(signal.next_check for signal in useful[:3] if signal.next_check)
+    if not report.main_goal_ids:
+        actions.append("Выбрать основные бизнес-цели для расчёта конверсий и CPA.")
+    unavailable = [
+        source
+        for source, status in report.source_status.items()
+        if source in ("Директ", "Метрика") and status not in ("ok", "not_checked", "no_data")
+    ]
+    if unavailable:
+        actions.append("Проверить получение данных: " + ", ".join(unavailable) + ".")
+    actions = list(dict.fromkeys(actions))
+    if not actions:
+        actions = ["Продолжить наблюдение; значимых действий по доступным данным не требуется."]
+    lines += ["", "Что сделать:", *[f"{i}. {text}" for i, text in enumerate(actions[:3], 1)]]
+
+    source_text = ", ".join(
+        f"{source} — {STATUS_NAMES.get(status, status)}"
+        for source, status in report.source_status.items()
+        if source in ("Директ", "Метрика")
+    )
+    limitations = len(set(report.limitations))
+    lines += [
+        "",
+        "Полнота данных: "
+        + source_text
+        + (f"; технических ограничений: {limitations}" if limitations else "."),
+    ]
+    return redact("\n".join(lines))
+
+
 def detailed(report: ClientReport) -> str:
     lines = [
         "🧪 MOCK — тестовые данные" if report.mock else "📊 AdBeam Performance Analyst",
@@ -347,61 +434,86 @@ def detailed(report: ClientReport) -> str:
 def compact(
     reports: list[ClientReport], period, errors: list[str] | None = None, summary=False
 ) -> str:
+    ordered = sorted(
+        reports,
+        key=lambda report: (
+            {"red": 0, "yellow": 1, "unknown": 2, "green": 3}.get(report.level, 2),
+            -abs(Decimal(report.changes.get("spend", {}).get("percent") or 0)),
+            -(report.current.spend or 0),
+        ),
+    )
+    data_issues = [
+        report
+        for report in ordered
+        if report.current.spend is None
+        or any(
+            report.source_status.get(source) not in (None, "ok", "not_checked", "no_data")
+            for source in ("Директ", "Метрика")
+        )
+    ]
+    issue_ids = {report.client_id for report in data_issues}
+    attention = [
+        report
+        for report in ordered
+        if report.level in ("red", "yellow") and report.client_id not in issue_ids
+    ]
+    stable = [
+        report
+        for report in ordered
+        if report.client_id not in issue_ids and report not in attention
+    ]
     lines = [
         "🧪 MOCK — тестовые данные"
         if any(r.mock for r in reports)
         else "📊 AdBeam Performance Analyst",
-        f"Сводка: {period.current.label()} (МСК)",
-        f"Сравнение: {period.previous.label()}",
-        f"Проверено: {len(reports)} проектов",
+        f"{period.current.label()} против {period.previous.label()}",
+        (
+            f"Проверено {len(reports)} проектов: требуют внимания {len(attention)}, "
+            f"без существенных сигналов {len(stable)}, проблемы данных {len(data_issues)}."
+        ),
         "",
+        "Главные проекты:",
     ]
-    healthy = 0
-    for report in sorted(
-        reports, key=lambda r: {"red": 0, "yellow": 1, "unknown": 2, "green": 3}.get(r.level, 2)
-    ):
-        if report.level == "green" and not summary:
-            healthy += 1
-            continue
-        lines.append(f"{ICONS.get(report.level, '⚪')} {report.client_name}")
+    candidates = [*attention, *data_issues]
+    if not candidates:
+        candidates = [report for report in ordered if report.current.spend is not None]
+    for report in candidates[:5]:
         if report.source_status.get("Директ") == "no_data":
-            lines.append("Директ не вернул статистику за период. Эффективность оценить нельзя.")
-        for key in (
-            "spend",
-            "impressions",
-            "clicks",
-            "ctr",
-            "cpc",
-            "conversions",
-            "cr",
-            "cpa",
-            "revenue",
-            "drr",
-        ):
-            if getattr(report.current, key) is not None:
-                lines.append(f"{METRIC_NAMES[key]}: {fmt(getattr(report.current, key))}")
-        lines += [s.message for s in report.signals[:2]]
-        unavailable = [
-            key for key, value in report.source_status.items() if value not in ("ok", "not_checked")
-        ]
-        if unavailable:
-            lines.append("Ограничения данных: " + ", ".join(unavailable))
-            lines.extend(report.limitations[:2])
-        elif report.limitations:
-            lines.append(report.limitations[0])
-        if not summary and report.drivers:
-            driver = report.drivers[0]
-            lines.append(
-                f"Наибольшее изменение расхода: {driver['name']} ({fmt(driver['spend_delta'])} ₽)."
+            fact = "нет статистики Директа за период"
+        elif report.current.spend is None:
+            fact = "расход не загрузился"
+        else:
+            spend = f"расход {fmt_short(report.current.spend, money=True)} ₽"
+            delta = report.changes.get("spend", {}).get("percent")
+            fact = spend + (
+                f" ({'+' if Decimal(delta) > 0 else ''}{fmt_short(delta, money=True)}%)"
+                if delta is not None
+                else ""
             )
-        lines.append("")
-    if healthy:
-        lines.append(f"🟢 Без существенных сигналов в выполненных проверках: {healthy} проектов.")
+        signal = next((s.message for s in report.signals if s.type != "tracking"), "")
+        lines.append(
+            f"{ICONS.get(report.level, '⚪')} {report.client_name}: {fact}"
+            + (f". {signal}" if signal else ".")
+        )
+    if len(candidates) > 5:
+        lines.append(f"Ещё проектов в этой группе: {len(candidates) - 5}.")
+
+    actions = []
+    for report in attention:
+        action = next((s.next_check for s in report.signals if s.next_check), None)
+        if action:
+            actions.append(f"{report.client_name}: {action}")
+    if data_issues:
+        actions.append(f"Восстановить или проверить источники у {len(data_issues)} проектов.")
+    actions = list(dict.fromkeys(actions))
+    if actions:
+        lines += ["", "Что сделать:", *[f"{i}. {v}" for i, v in enumerate(actions[:3], 1)]]
     if errors:
-        lines += [f"⚠ {error}" for error in errors]
-    lines += [
-        "Для деталей: /check <клиент>. Источники: Директ, Метрика; выручка — по настройкам клиента."
-    ]
+        lines += ["", "Не завершены проверки:"]
+        lines.extend(f"• {error}" for error in list(dict.fromkeys(errors))[:3])
+        if len(set(errors)) > 3:
+            lines.append(f"• Ещё: {len(set(errors)) - 3}.")
+    lines += ["", "Для технической расшифровки запустите проверку нужного клиента."]
     return redact("\n".join(lines))
 
 

@@ -81,6 +81,19 @@ def _daily(data: DirectData):
     return result
 
 
+def _chart_series(data: DirectData):
+    rows = _daily(data)
+    if data.period.days <= 30:
+        return (
+            rows,
+            [data.period.start + timedelta(days=index) for index in range(len(rows))],
+            "дням",
+        )
+    weekly = [aggregate(rows[index : index + 7]) for index in range(0, len(rows), 7)]
+    dates = [data.period.start + timedelta(days=index) for index in range(0, len(rows), 7)]
+    return weekly, dates, "неделям"
+
+
 def _dashed(draw, points, fill, width=3, segment=12):
     for left, right in zip(points, points[1:], strict=False):
         x1, y1 = left
@@ -102,7 +115,7 @@ def _dashed(draw, points, fill, width=3, segment=12):
             )
 
 
-def _panel(draw, box, title, current, previous, dates, *, money=False):
+def _panel(draw, box, title, current, previous, dates, *, money=False, x_label="Дни"):
     x1, y1, x2, y2 = box
     draw.rounded_rectangle(box, radius=26, fill="white", outline=GRID, width=2)
     draw.text((x1 + 28, y1 + 22), title, font=_font(25, bold=True), fill=INK)
@@ -152,7 +165,7 @@ def _panel(draw, box, title, current, previous, dates, *, money=False):
             )
         draw.text(
             ((px1 + px2) / 2, py2 + 34),
-            "Дни текущего периода",
+            f"{x_label} текущего периода",
             font=_font(13),
             fill=MUTED,
             anchor="ma",
@@ -169,8 +182,8 @@ def render_dynamics(client_name, period, current: DirectData, previous: DirectDa
         font=_font(24),
         fill=MUTED,
     )
-    now_rows, old_rows = _daily(current), _daily(previous)
-    dates = [current.period.start + timedelta(days=index) for index in range(len(now_rows))]
+    now_rows, dates, grouping = _chart_series(current)
+    old_rows, _, _ = _chart_series(previous)
     now_total, old_total = aggregate(now_rows), aggregate(old_rows)
     now_metrics, old_metrics = calculate(now_total), calculate(old_total)
     cards = (
@@ -196,27 +209,30 @@ def render_dynamics(client_name, period, current: DirectData, previous: DirectDa
     _panel(
         draw,
         (65, 330, 1535, 650),
-        "Расход по дням, ₽",
+        f"Расход по {grouping}, ₽",
         [row.spend for row in now_rows],
         [row.spend for row in old_rows],
         dates,
         money=True,
+        x_label="Недели" if grouping == "неделям" else "Дни",
     )
     _panel(
         draw,
         (65, 680, 790, 1010),
-        "Клики по дням, шт.",
+        f"Клики по {grouping}, шт.",
         [row.clicks for row in now_rows],
         [row.clicks for row in old_rows],
         dates,
+        x_label="Недели" if grouping == "неделям" else "Дни",
     )
     _panel(
         draw,
         (815, 680, 1535, 1010),
-        "Конверсии по дням, шт.",
+        f"Конверсии по {grouping}, шт.",
         [row.conversions for row in now_rows],
         [row.conversions for row in old_rows],
         dates,
+        x_label="Недели" if grouping == "неделям" else "Дни",
     )
     draw.line((65, 1055, 105, 1055), fill=BLUE, width=4)
     draw.text((120, 1040), "Текущий период", font=_font(19), fill=INK)

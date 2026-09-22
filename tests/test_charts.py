@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 from PIL import Image
 
 from app.analytics.periods import make_period
-from app.reporting.charts import render_dynamics
+from app.reporting.charts import _chart_series, render_dynamics
 
 
 async def test_dynamics_chart_is_readable_png(runtime, client):
@@ -36,3 +36,7 @@ async def test_90_day_dynamics_uses_bounded_date_chunks(runtime, client):
     assert all(call.args[1].days <= 30 and call.args[2] == "date" for call in calls)
     assert len(current.rows) == 90
     assert len(previous.rows) == 90
+    rows, dates, grouping = _chart_series(current)
+    assert len(rows) == len(dates) == 13
+    assert grouping == "неделям"
+    assert sum(row.clicks or 0 for row in rows) == current.totals.clicks

@@ -652,6 +652,29 @@ class Repository:
                 .limit(1)
             )
 
+    async def latest_run(self, chat_id, user_id):
+        """Return a detached, bounded view of the latest interactive check."""
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(Run)
+                .where(
+                    Run.app_mode == self.app_mode,
+                    Run.chat_id == str(chat_id),
+                    Run.user_id == str(user_id),
+                    Run.trigger.in_(("telegram_command", "agent")),
+                )
+                .order_by(Run.started_at.desc())
+                .limit(1)
+            )
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "status": row.status,
+            "reports": row.reports or [],
+            "started_at": row.started_at,
+        }
+
     async def delivery(self, key):
         async with self.sessions() as session:
             return await session.get(Delivery, key)

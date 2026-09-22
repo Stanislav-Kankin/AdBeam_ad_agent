@@ -21,7 +21,7 @@ from app.domain.reports import (
     Totals,
     TriggerSource,
 )
-from app.reporting.formatter import compact, detailed
+from app.reporting.formatter import compact, executive
 
 logger = logging.getLogger(__name__)
 WAREHOUSE_DIMENSIONS = ("device", "geo", "search", "placement")
@@ -562,7 +562,7 @@ class CheckService:
                     if any(v == "unavailable" for v in result.source_status.values()):
                         errors.append(f"{client.name}: один или несколько источников недоступны.")
             text = (
-                detailed(reports[0])
+                executive(reports[0])
                 if len(clients) == 1 and reports and mode != CheckMode.SUMMARY
                 else compact(reports, period, errors, mode == CheckMode.SUMMARY)
             )
