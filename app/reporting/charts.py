@@ -81,7 +81,7 @@ def _daily(data: DirectData):
     return result
 
 
-def _dashed(draw, points, fill, width=4, segment=12):
+def _dashed(draw, points, fill, width=3, segment=12):
     for left, right in zip(points, points[1:], strict=False):
         x1, y1 = left
         x2, y2 = right
@@ -132,11 +132,11 @@ def _panel(draw, box, title, current, previous, dates, *, money=False):
         draw.polygon(area, fill=BLUE_FILL)
     old_points = points(previous)
     if len(old_points) > 1:
-        _dashed(draw, old_points, "#8492A8", 4)
+        _dashed(draw, old_points, "#8492A8", 3)
     if len(new_points) > 1:
-        draw.line(new_points, fill=BLUE, width=6, joint="curve")
+        draw.line(new_points, fill=BLUE, width=4, joint="curve")
     for x, y in new_points[:: max(1, len(new_points) // 12)]:
-        draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=BLUE)
+        draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill=BLUE)
     if dates:
         count = len(dates)
         tick_indexes = sorted({0, (count - 1) // 3, 2 * (count - 1) // 3, count - 1})
@@ -218,9 +218,9 @@ def render_dynamics(client_name, period, current: DirectData, previous: DirectDa
         [row.conversions for row in old_rows],
         dates,
     )
-    draw.line((65, 1055, 105, 1055), fill=BLUE, width=6)
+    draw.line((65, 1055, 105, 1055), fill=BLUE, width=4)
     draw.text((120, 1040), "Текущий период", font=_font(19), fill=INK)
-    _dashed(draw, [(330, 1055), (370, 1055)], "#9AA6BA", 4, 8)
+    _dashed(draw, [(330, 1055), (370, 1055)], "#9AA6BA", 3, 8)
     draw.text((385, 1040), "Предыдущий период", font=_font(19), fill=MUTED)
     draw.text((1535, 1040), "AdBeam", font=_font(19, bold=True), fill=MUTED, anchor="ra")
     output = BytesIO()
