@@ -226,7 +226,7 @@ class MetricaAdapter:
             metric_names[f"ym:s:goal{goal_id}conversionRate"] = f"goal_{goal_id}_conversion_rate"
 
         merged, sampled, sample_share, total_rows = {}, False, number(1), 0
-        for metrics in batches:
+        for batch_index, metrics in enumerate(batches):
             params = {
                 "ids": counter_id,
                 "date1": str(period.start),
@@ -245,13 +245,21 @@ class MetricaAdapter:
                 params["filters"] = (
                     f"ym:s:{attribution}DirectClickOrder=.(" + ",".join(campaign_ids) + ")"
                 )
-            data = await self.transport.json(
-                "metrica",
-                "GET",
-                BASE_URL + "/stat/v1/data",
-                headers=self.headers(client),
-                params=params,
-            )
+            try:
+                data = await self.transport.json(
+                    "metrica",
+                    "GET",
+                    BASE_URL + "/stat/v1/data",
+                    headers=self.headers(client),
+                    params=params,
+                )
+            except IntegrationError as exc:
+                if batch_index == 0:
+                    raise
+                limitations.append(
+                    f"Целевые метрики не загружены; трафик и поведение сохранены ({exc})."
+                )
+                continue
             query = data.get("query", {})
             if query.get("date1") != str(period.start) or query.get("date2") != str(period.end):
                 raise IntegrationError("metrica", "period_mismatch")

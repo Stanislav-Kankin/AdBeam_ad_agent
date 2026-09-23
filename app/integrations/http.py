@@ -13,6 +13,29 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _safe_api_error(response):
+    """Return only upstream machine codes; never echo response text or user data."""
+    try:
+        data = response.json()
+    except (ValueError, TypeError):
+        return None
+    candidates = []
+    if isinstance(data, dict):
+        errors = data.get("errors")
+        if isinstance(errors, list):
+            candidates.extend(item.get("error_type") for item in errors if isinstance(item, dict))
+        error = data.get("error")
+        if isinstance(error, dict):
+            candidates.extend((error.get("error_type"), error.get("error_code")))
+        candidates.extend((data.get("error_type"), data.get("code")))
+    for candidate in candidates:
+        if isinstance(candidate, int):
+            return str(candidate)
+        if isinstance(candidate, str) and re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]{0,99}", candidate):
+            return candidate
+    return None
+
+
 class IntegrationError(Exception):
     def __init__(self, source: str, code: str):
         self.source, self.code = source, code
@@ -126,7 +149,16 @@ class ReadTransport:
                 retryable = response.status_code == 429 or response.status_code >= 500
                 retryable |= pending and response.status_code in (201, 202)
                 if not retryable:
-                    raise IntegrationError(source, f"http_{response.status_code}")
+                    upstream = _safe_api_error(response)
+                    logger.warning(
+                        "API rejected request source=%s operation=%s status=%s type=%s",
+                        source,
+                        operation,
+                        response.status_code,
+                        upstream or "unknown",
+                    )
+                    suffix = f"_{upstream}" if upstream else ""
+                    raise IntegrationError(source, f"http_{response.status_code}{suffix}")
                 waiting = offline and response.status_code in (201, 202)
                 if attempt >= self.retries and not waiting:
                     raise IntegrationError(source, f"retry_exhausted_http_{response.status_code}")

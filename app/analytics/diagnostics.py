@@ -427,6 +427,46 @@ class CheckService:
             ),
         }
 
+    async def resolve_campaign_references(self, client, period, references):
+        """Resolve campaign names without relying on prior model tool context."""
+        if not references:
+            return {"ids": [], "unresolved": [], "ambiguous": {}}
+        current, previous = await asyncio.gather(
+            self.breakdown(client, period.current, "campaign"),
+            self.breakdown(client, period.previous, "campaign"),
+        )
+        campaigns = {}
+        for row in [*current.rows, *previous.rows]:
+            campaigns.setdefault(str(row.id), row.name)
+        resolved, unresolved, ambiguous = [], [], {}
+        for reference in references:
+            value = str(reference).strip()
+            if value.isdigit():
+                resolved.append(value)
+                continue
+            needle = value.casefold()
+            exact = [
+                campaign_id for campaign_id, name in campaigns.items() if name.casefold() == needle
+            ]
+            matches = exact or [
+                campaign_id for campaign_id, name in campaigns.items() if needle in name.casefold()
+            ]
+            matches = list(dict.fromkeys(matches))
+            if len(matches) == 1:
+                resolved.append(matches[0])
+            elif not matches:
+                unresolved.append(value)
+            else:
+                ambiguous[value] = [
+                    {"id": campaign_id, "name": campaigns[campaign_id]}
+                    for campaign_id in matches[:5]
+                ]
+        return {
+            "ids": list(dict.fromkeys(resolved)),
+            "unresolved": unresolved,
+            "ambiguous": ambiguous,
+        }
+
     async def analyze(self, client, period, mode):
         logger.info("Check queued client=%s mode=%s", client.id, mode)
         async with self.semaphore:

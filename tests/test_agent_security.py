@@ -117,6 +117,45 @@ async def test_agent_can_request_validated_metrica_campaign_drilldown(runtime):
     assert report["goals"][0]["id"] == "123456"
 
 
+async def test_metrica_drilldown_resolves_exact_campaign_name(runtime):
+    client = runtime.registry.clients["west_export"]
+    campaign = (await runtime.checks.provider.breakdown(client, make_period("14d").current)).rows[0]
+    result = await runtime.agent.tools.call(
+        "get_metrica_direct_report",
+        json.dumps(
+            {
+                "client_id": "west_export",
+                "period": "14d",
+                "report": "search_phrase",
+                "campaign_ids": [campaign.name],
+            }
+        ),
+        chat_id=123456789,
+        request_id="campaign-name",
+    )
+
+    assert result["metrica_report"]["rows"][0]["dimensions"][0]["id"] == campaign.id
+
+
+async def test_metrica_drilldown_returns_resolution_details(runtime):
+    result = await runtime.agent.tools.call(
+        "get_metrica_direct_report",
+        json.dumps(
+            {
+                "client_id": "west_export",
+                "period": "14d",
+                "report": "search_phrase",
+                "campaign_ids": ["campaign that does not exist"],
+            }
+        ),
+        chat_id=123456789,
+        request_id="campaign-missing",
+    )
+
+    assert result["status"] == "invalid"
+    assert result["unresolved"] == ["campaign that does not exist"]
+
+
 def test_custom_iso_period_is_valid_json():
     args = ClientArgs.model_validate_json(
         '{"client_id":"ab-grandline","start_date":"2026-07-23",'

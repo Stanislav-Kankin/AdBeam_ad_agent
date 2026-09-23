@@ -136,6 +136,26 @@ async def test_http_does_not_retry_auth_or_expose_response():
     assert count == 1 and "secret" not in str(error.value)
 
 
+async def test_http_surfaces_safe_upstream_error_type_without_response_text():
+    async def handler(request):
+        return httpx.Response(
+            400,
+            json={
+                "errors": [
+                    {
+                        "error_type": "invalid_parameter",
+                        "message": "secret response with personal information",
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(IntegrationError, match="http_400_invalid_parameter") as error:
+            await ReadTransport(http).request("metrica", "GET", "https://example.invalid")
+    assert "secret" not in str(error.value)
+
+
 async def test_huge_retry_after_does_not_violate_rate_limit():
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
@@ -296,6 +316,52 @@ async def test_metrica_direct_report_builds_campaign_goal_and_behavior_rows(clie
     assert result["rows"][0]["metrics"]["bounce_rate"] == Decimal("12.5")
     assert result["rows"][0]["metrics"]["goal_123456_visits"] == 7
     assert result["goals"] == [{"id": "123456", "name": "Purchase"}]
+
+
+async def test_metrica_direct_report_keeps_behavior_when_goal_batch_fails(client, monkeypatch):
+    monkeypatch.setenv("METRICA_OAUTH_TOKEN", "test-token")
+    period = make_period().current
+
+    def handler(request):
+        if request.url.path.endswith("/goals"):
+            return httpx.Response(200, json={"goals": [{"id": 123456, "name": "Purchase"}]})
+        metrics = request.url.params["metrics"].split(",")
+        if any("goal" in metric for metric in metrics):
+            return httpx.Response(
+                400,
+                json={"errors": [{"error_type": "incompatible_metrics"}]},
+            )
+        values = {
+            "ym:s:visits": 100,
+            "ym:s:users": 80,
+            "ym:s:bounceRate": 12.5,
+            "ym:s:pageDepth": 4.2,
+            "ym:s:avgVisitDurationSeconds": 180,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "query": {"date1": str(period.start), "date2": str(period.end)},
+                "data": [
+                    {
+                        "dimensions": [{"id": "101", "name": "Search"}],
+                        "metrics": [values[name] for name in metrics],
+                    }
+                ],
+                "total_rows": 1,
+                "sampled": False,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await MetricaAdapter(ReadTransport(http)).direct_report(
+            client, period, "campaign", goal_ids=["123456"]
+        )
+
+    assert result["rows"][0]["metrics"]["visits"] == 100
+    assert "goal_123456_visits" not in result["rows"][0]["metrics"]
+    assert result["status"] == "insufficient"
+    assert "http_400_incompatible_metrics" in result["limitations"][0]
 
 
 async def test_roistat_aggregates_only_and_does_not_double_count(client, monkeypatch):

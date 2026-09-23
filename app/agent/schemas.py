@@ -90,7 +90,7 @@ class MetricaReportArgs(ClientArgs):
     campaign_ids: list[str] = Field(
         default_factory=list,
         max_length=100,
-        description="ID кампаний для углубления; пустой список означает все кампании клиента.",
+        description="ID, точные названия или однозначные фрагменты названий кампаний; пустой список означает все кампании клиента.",
     )
     goal_ids: list[str] = Field(
         default_factory=list,
@@ -98,10 +98,18 @@ class MetricaReportArgs(ClientArgs):
         description="ID целей из get_metrica_goals; пустой список использует основные цели.",
     )
 
-    @field_validator("campaign_ids", "goal_ids")
+    @field_validator("campaign_ids")
+    @classmethod
+    def campaign_references(cls, values):
+        cleaned = list(dict.fromkeys(value.strip() for value in values))
+        if any(not value or len(value) > 200 for value in cleaned):
+            raise ValueError("Invalid campaign reference.")
+        return cleaned
+
+    @field_validator("goal_ids")
     @classmethod
     def numeric_ids(cls, values):
         cleaned = list(dict.fromkeys(value.strip() for value in values))
         if any(not value.isdigit() for value in cleaned):
-            raise ValueError("ID кампаний и целей должны состоять из цифр.")
+            raise ValueError("Goal IDs must be numeric.")
         return cleaned

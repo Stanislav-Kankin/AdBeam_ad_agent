@@ -110,6 +110,22 @@ class ToolRegistry:
                 )
                 return {**base, "reports": [r.model_dump(mode="json") for r in reports]}
             if name == "get_metrica_direct_report":
+                resolution = await self.checks.resolve_campaign_references(
+                    client, period, args.campaign_ids
+                )
+                if resolution["unresolved"] or resolution["ambiguous"]:
+                    status = "invalid"
+                    error = (
+                        "Кампанию не удалось определить однозначно. "
+                        "Вызовите get_campaign_breakdown и повторите запрос с ID "
+                        "или точным названием."
+                    )
+                    return {
+                        "status": status,
+                        "error": error,
+                        "unresolved": resolution["unresolved"],
+                        "ambiguous": resolution["ambiguous"],
+                    }
                 return {
                     **base,
                     "metrica_report": await self.checks.metrica_report(
@@ -117,7 +133,7 @@ class ToolRegistry:
                         period,
                         args.report,
                         goal_ids=args.goal_ids,
-                        campaign_ids=args.campaign_ids,
+                        campaign_ids=resolution["ids"],
                         top_n=args.top_n,
                     ),
                 }
