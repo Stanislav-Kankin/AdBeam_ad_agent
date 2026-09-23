@@ -20,7 +20,10 @@ def database(url):
         def sqlite_pragmas(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
+            # A report can persist a large snapshot while an administrator
+            # changes goals. Give SQLite enough time to hand the single writer
+            # slot to the next transaction instead of failing the menu action.
+            cursor.execute("PRAGMA busy_timeout=30000")
             cursor.close()
 
     return engine, async_sessionmaker(engine, expire_on_commit=False)

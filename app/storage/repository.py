@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
@@ -39,6 +40,16 @@ class Repository:
     def __init__(self, sessions, app_mode):
         self.sessions, self.app_mode = sessions, app_mode
         self.model_quota_lock = asyncio.Lock()
+        # SQLite allows one writer at a time. Background cache warming, report
+        # persistence and menu settings all share this repository, so queue
+        # their transactions rather than making them race for the database.
+        self.write_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def write_session(self):
+        async with self.write_lock:
+            async with self.sessions.begin() as session:
+                yield session
 
     async def bot_users(self):
         async with self.sessions() as session:
@@ -52,7 +63,7 @@ class Repository:
         return {int(r.user_id): {"enabled": r.enabled, "client_ids": r.client_ids} for r in rows}
 
     async def set_bot_user(self, user_id, enabled, client_ids, actor):
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             row = await session.get(BotUser, (self.app_mode, str(user_id)))
             if row is None:
                 row = BotUser(app_mode=self.app_mode, user_id=str(user_id))
@@ -64,7 +75,7 @@ class Repository:
         # One bot process per database. Reservation is persisted before the API call.
         today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         async with self.model_quota_lock:
-            async with self.sessions.begin() as session:
+            async with self.write_session() as session:
                 used = await session.scalar(
                     select(func.count())
                     .select_from(ToolEvent)
@@ -93,7 +104,7 @@ class Repository:
 
     async def purge(self, days=90):
         cutoff = datetime.now(UTC) - timedelta(days=days)
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             await session.execute(
                 delete(Run).where(Run.app_mode == self.app_mode, Run.started_at < cutoff)
             )
@@ -163,7 +174,7 @@ class Repository:
     async def save_analysis(self, client_id, period, kind, payload, *, ttl_hours=12):
         key = (self.app_mode, client_id, str(period.start), str(period.end), kind)
         captured = datetime.now(UTC)
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             row = await session.get(SnapshotCache, key)
             if row is None:
                 row = SnapshotCache(
@@ -276,7 +287,7 @@ class Repository:
         refresh_in = timedelta(hours=4 if age_days <= 3 else 24 * 30)
         if not complete:
             refresh_in = timedelta(hours=1)
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             row = await session.get(DailySnapshot, key)
             if row is None:
                 row = DailySnapshot(
@@ -328,7 +339,7 @@ class Repository:
         captured = datetime.now(UTC)
         age_days = (datetime.now(UTC).date() - day).days
         refresh_in = timedelta(hours=4 if age_days <= 3 else 24 * 30)
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             row = await session.get(DirectDimensionPage, key)
             if row is None:
                 row = DirectDimensionPage(
@@ -441,7 +452,7 @@ class Repository:
         quality = "quick" if quick else "full"
         key = (self.app_mode, client_id, str(period.start), str(period.end), quality)
         now = datetime.now(UTC)
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             row = await session.get(SnapshotCache, key)
             if row is None:
                 row = SnapshotCache(
@@ -476,7 +487,7 @@ class Repository:
         self, chat_id, user_id, messages=None, *, active_client_id=None, period=None
     ):
         key = (self.app_mode, str(chat_id), str(user_id))
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             row = await session.get(ConversationState, key)
             if row is None:
                 row = ConversationState(
@@ -492,7 +503,7 @@ class Repository:
             row.updated_at = datetime.now(UTC)
 
     async def clear_conversation(self, chat_id, user_id):
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             await session.execute(
                 delete(ConversationState).where(
                     ConversationState.app_mode == self.app_mode,
@@ -524,7 +535,7 @@ class Repository:
     async def save_client_preferences(
         self, client, *, counter_ids=None, goal_ids=None, goal_roles=None, user_id=None
     ):
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             row = await session.get(ClientPreference, (self.app_mode, client.id))
             if row is None:
                 row = ClientPreference(
@@ -545,7 +556,7 @@ class Repository:
         return await self.configure_client(client)
 
     async def invalidate_snapshots(self, client_id):
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             await session.execute(
                 delete(SnapshotCache).where(
                     SnapshotCache.app_mode == self.app_mode,
@@ -567,7 +578,7 @@ class Repository:
 
     async def save_counter_catalog(self, counters):
         now = datetime.now(UTC)
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             for value in counters:
                 key = (self.app_mode, int(value["id"]))
                 row = await session.get(MetricaCounterCatalog, key)
@@ -583,7 +594,7 @@ class Repository:
 
     async def save_client_counters(self, client_id, counters):
         now = datetime.now(UTC)
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             await session.execute(
                 delete(ClientCounter).where(
                     ClientCounter.app_mode == self.app_mode,
@@ -641,7 +652,7 @@ class Repository:
         ]
 
     async def begin_run(self, chat_id, client_ids, period, mode, trigger, user_id=None):
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             run = Run(
                 app_mode=self.app_mode,
                 chat_id=str(chat_id),
@@ -656,7 +667,7 @@ class Repository:
             return run.id
 
     async def finish_run(self, run_id, reports, errors, text, duration, status=None):
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             await session.execute(
                 update(Run)
                 .where(Run.id == run_id)
@@ -671,7 +682,7 @@ class Repository:
             )
 
     async def tool_event(self, **kwargs):
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             session.add(ToolEvent(app_mode=self.app_mode, **safe_json(kwargs)))
 
     async def last_schedule(self, chat_id):
@@ -715,7 +726,7 @@ class Repository:
             return await session.get(Delivery, key)
 
     async def save_delivery(self, key, parts=None, next_part=0, status="pending"):
-        async with self.sessions.begin() as session:
+        async with self.write_session() as session:
             row = await session.get(Delivery, key)
             if row is None:
                 row = Delivery(key=key, parts=parts or [])
