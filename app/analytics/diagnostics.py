@@ -27,6 +27,7 @@ from app.reporting.formatter import brief, compact
 from app.storage.repository import safe_json
 
 logger = logging.getLogger(__name__)
+METRICA_REPORT_CACHE_VERSION = 2
 WAREHOUSE_DIMENSIONS = ("device", "geo", "search", "placement")
 
 
@@ -306,6 +307,7 @@ class CheckService:
         self, client, period, report_type, *, goal_ids=None, campaign_ids=None, top_n=20
     ):
         options = {
+            "cache_version": METRICA_REPORT_CACHE_VERSION,
             "report": report_type,
             "goals": sorted(goal_ids or client.metrica.main_goal_ids),
             "campaigns": sorted(campaign_ids or []),

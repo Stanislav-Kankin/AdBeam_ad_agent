@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 from app.analytics.periods import make_period
 from app.domain.reports import CheckMode, TriggerSource
 from app.reporting.formatter import audience_report, brief, compact, detailed, executive
@@ -100,6 +103,38 @@ async def test_metrica_campaign_report_compares_periods_and_is_cached(runtime, c
     assert first["rows"][0]["dimensions"][0]["name"]
     assert "visits" in first["rows"][0]["changes"]
     assert "goal_123456_visits" in first["rows"][0]["current"]
+
+
+async def test_metrica_report_ignores_legacy_cache_after_schema_change(
+    runtime, client, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    period = make_period("14d")
+    old_options = {
+        "report": "campaign",
+        "goals": sorted(client.metrica.main_goal_ids),
+        "campaigns": [],
+        "top_n": 20,
+    }
+    old_kind = (
+        "mr"
+        + hashlib.sha256(json.dumps(old_options, sort_keys=True).encode("utf-8")).hexdigest()[:8]
+    )
+    await runtime.checks.repository.save_analysis(
+        client.id,
+        period.current,
+        old_kind,
+        {"status": "unavailable", "rows": [], "limitations": ["legacy"]},
+    )
+    spy = AsyncMock(wraps=runtime.checks.provider.metrica_direct_report)
+    monkeypatch.setattr(runtime.checks.provider, "metrica_direct_report", spy)
+
+    report = await runtime.checks.metrica_report(client, period, "campaign")
+
+    assert spy.await_count == 2
+    assert report["rows"]
+    assert "legacy" not in report["limitations"]
 
 
 async def test_metrica_campaign_report_keeps_direct_campaign_without_visits(
