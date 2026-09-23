@@ -139,6 +139,47 @@ class MockProvider:
             "limitations": [],
         }
 
+    async def metrica_direct_report(
+        self, client, period, report_type, *, goal_ids=None, campaign_ids=None, limit=20
+    ):
+        goals = list(goal_ids or client.metrica.main_goal_ids)
+        rows = []
+        for row in (await self.breakdown(client, period, "campaign")).rows[:limit]:
+            if campaign_ids and row.id not in campaign_ids:
+                continue
+            metrics = {
+                "visits": row.totals.clicks,
+                "users": max(0, (row.totals.clicks or 0) - 5),
+                "bounce_rate": Decimal("18.5"),
+                "page_depth": Decimal("3.2"),
+                "avg_visit_duration_seconds": Decimal("145"),
+            }
+            for goal_id in goals:
+                metrics[f"goal_{goal_id}_visits"] = row.totals.conversions
+                metrics[f"goal_{goal_id}_conversion_rate"] = (
+                    Decimal(row.totals.conversions or 0) / Decimal(row.totals.clicks or 1) * 100
+                )
+            rows.append(
+                {
+                    "key": row.id,
+                    "dimensions": [{"id": row.id, "name": row.name}],
+                    "metrics": metrics,
+                }
+            )
+        return {
+            "status": "ok",
+            "counter_id": client.metrica.counter_id or 1,
+            "report": report_type,
+            "attribution": "lastsign",
+            "goals": [{"id": value, "name": "Основная цель"} for value in goals],
+            "rows": rows,
+            "total_rows": len(rows),
+            "truncated": False,
+            "sampled": False,
+            "sample_share": 1,
+            "limitations": [],
+        }
+
     async def snapshot(self, client, period, *, quick=False):
         direct = await self.breakdown(client, period)
         missing = client.mock_scenario == "unavailable"

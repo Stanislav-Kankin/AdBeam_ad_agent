@@ -3,7 +3,7 @@ from time import monotonic
 
 from pydantic import ValidationError
 
-from app.agent.schemas import ClientArgs, ListArgs
+from app.agent.schemas import ClientArgs, ListArgs, MetricaReportArgs
 from app.analytics.diagnostics import drivers, snapshot_metrics
 from app.analytics.metrics import calculate, compare
 from app.analytics.rules import tracking_health
@@ -20,6 +20,7 @@ DESCRIPTIONS = {
     "get_search_queries": "Топ поисковых запросов по расходу, клики и основные конверсии; контакты маскируются.",
     "get_placements": "Топ площадок РСЯ по расходу, кликам и основным конверсиям.",
     "get_audience_breakdown": "Возраст, пол и уровень дохода рекламного трафика Директа; долгосрочные интересы аудитории сайта из Метрики.",
+    "get_metrica_direct_report": "Отчёт Метрики по кампаниям Директа и выбранным целям: кампании, объявления, условия показа, поисковые фразы или площадки; включает поведение и сравнение периодов.",
     "get_metrica_goals": "Доступные цели и достижения основных целей Метрики, без персональных данных.",
     "check_tracking_health": "Проверка поступления данных, наличия целей и исчезновения конверсий. Не является тестом форм на сайте.",
     "get_revenue": "Выручка из настроенного источника, её статус, период и сопоставимость.",
@@ -42,7 +43,11 @@ def tool_schemas():
                 "name": name,
                 "description": description,
                 "parameters": (
-                    ListArgs if name == "list_clients" else ClientArgs
+                    ListArgs
+                    if name == "list_clients"
+                    else MetricaReportArgs
+                    if name == "get_metrica_direct_report"
+                    else ClientArgs
                 ).model_json_schema(),
             },
         }
@@ -61,9 +66,14 @@ class ToolRegistry:
                 raise PermissionError
             if name not in DESCRIPTIONS:
                 raise ValueError("unknown_tool")
-            args = (ListArgs if name == "list_clients" else ClientArgs).model_validate_json(
-                arguments
+            schema = (
+                ListArgs
+                if name == "list_clients"
+                else MetricaReportArgs
+                if name == "get_metrica_direct_report"
+                else ClientArgs
             )
+            args = schema.model_validate_json(arguments)
             validated = args.model_dump(mode="json")
             if name == "list_clients":
                 clients = self.checks.registry.visible(chat_id)
@@ -99,6 +109,18 @@ class ToolRegistry:
                     user_id=user_id,
                 )
                 return {**base, "reports": [r.model_dump(mode="json") for r in reports]}
+            if name == "get_metrica_direct_report":
+                return {
+                    **base,
+                    "metrica_report": await self.checks.metrica_report(
+                        client,
+                        period,
+                        args.report,
+                        goal_ids=args.goal_ids,
+                        campaign_ids=args.campaign_ids,
+                        top_n=args.top_n,
+                    ),
+                }
             if name == "get_audience_breakdown":
                 return {**base, "audience": await self.checks.audience(client, period)}
             if name in DIMENSIONS:

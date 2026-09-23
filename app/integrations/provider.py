@@ -19,6 +19,7 @@ class AnalyticsProvider(Protocol):
     async def breakdown(self, client, period, dimension="campaign") -> DirectData: ...
     async def breakdown_page(self, client, period, dimension, page): ...
     async def audience_interests(self, client, period): ...
+    async def metrica_direct_report(self, client, period, report_type, **kwargs): ...
 
 
 def error_code(exc):
@@ -59,6 +60,18 @@ class ProductionProvider:
         try:
             return await self.metrica.audience_interests(client, period)
         except Exception as exc:
+            return {"rows": [], "limitations": [error_code(exc)], "status": "unavailable"}
+
+    async def metrica_direct_report(self, client, period, report_type, **kwargs):
+        try:
+            return await self.metrica.direct_report(client, period, report_type, **kwargs)
+        except Exception as exc:
+            logger.warning(
+                "Metrica Direct report failed client=%s report=%s error=%s",
+                client.id,
+                report_type,
+                error_code(exc),
+            )
             return {"rows": [], "limitations": [error_code(exc)], "status": "unavailable"}
 
     async def snapshot(self, client, period, *, quick=False):

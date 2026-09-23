@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -77,3 +78,30 @@ class ClientArgs(StrictModel):
                 previous=DateRange(start=self.compare_start, end=self.compare_end),
             ).completed()
         return make_period(self.period).completed()
+
+
+class MetricaReportArgs(ClientArgs):
+    report: Literal["campaign", "ad", "condition", "search_phrase", "platform"] = Field(
+        default="campaign",
+        description=(
+            "Детализация отчёта Метрики: campaign, ad, condition, search_phrase или platform."
+        ),
+    )
+    campaign_ids: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+        description="ID кампаний для углубления; пустой список означает все кампании клиента.",
+    )
+    goal_ids: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="ID целей из get_metrica_goals; пустой список использует основные цели.",
+    )
+
+    @field_validator("campaign_ids", "goal_ids")
+    @classmethod
+    def numeric_ids(cls, values):
+        cleaned = list(dict.fromkeys(value.strip() for value in values))
+        if any(not value.isdigit() for value in cleaned):
+            raise ValueError("ID кампаний и целей должны состоять из цифр.")
+        return cleaned

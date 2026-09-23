@@ -93,6 +93,30 @@ async def test_tool_accepts_client_login_and_long_period(runtime):
     assert result["period"]["current"]["start"] < result["period"]["current"]["end"]
 
 
+async def test_agent_can_request_validated_metrica_campaign_drilldown(runtime):
+    result = await runtime.agent.tools.call(
+        "get_metrica_direct_report",
+        json.dumps(
+            {
+                "client_id": "west_export",
+                "period": "14d",
+                "report": "campaign",
+                "goal_ids": ["123456"],
+                "campaign_ids": ["101"],
+                "top_n": 10,
+            }
+        ),
+        chat_id=123456789,
+        request_id="metrica-campaigns",
+    )
+
+    report = result["metrica_report"]
+    assert report["report"] == "campaign"
+    assert report["rows"][0]["dimensions"][0]["id"] == "101"
+    assert report["rows"][0]["direct"]["current"]["spend"] is not None
+    assert report["goals"][0]["id"] == "123456"
+
+
 def test_custom_iso_period_is_valid_json():
     args = ClientArgs.model_validate_json(
         '{"client_id":"ab-grandline","start_date":"2026-07-23",'

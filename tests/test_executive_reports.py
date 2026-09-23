@@ -79,3 +79,60 @@ async def test_audience_breakdown_is_readable_and_cached(runtime, client, monkey
     assert "Возраст:" in text and "Пол:" in text and "Доход:" in text
     assert "Долгосрочные интересы" in text
     assert "аффинити" in text
+
+
+async def test_metrica_campaign_report_compares_periods_and_is_cached(runtime, client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    period = make_period("14d")
+    spy = AsyncMock(wraps=runtime.checks.provider.metrica_direct_report)
+    monkeypatch.setattr(runtime.checks.provider, "metrica_direct_report", spy)
+
+    first = await runtime.checks.metrica_report(
+        client, period, "campaign", goal_ids=["123456"], top_n=10
+    )
+    second = await runtime.checks.metrica_report(
+        client, period, "campaign", goal_ids=["123456"], top_n=10
+    )
+
+    assert first == second
+    assert spy.await_count == 2  # current and previous; the repeated request uses cache
+    assert first["rows"][0]["dimensions"][0]["name"]
+    assert "visits" in first["rows"][0]["changes"]
+    assert "goal_123456_visits" in first["rows"][0]["current"]
+
+
+async def test_metrica_campaign_report_keeps_direct_campaign_without_visits(
+    runtime, client, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    async def only_search(_client, date_range, report_type, **kwargs):
+        return {
+            "status": "ok",
+            "counter_id": 12345678,
+            "report": report_type,
+            "attribution": "last",
+            "goals": [],
+            "rows": [
+                {
+                    "key": "101",
+                    "dimensions": [{"id": "101", "name": "Поиск"}],
+                    "metrics": {"visits": 10},
+                }
+            ],
+            "total_rows": 1,
+            "truncated": False,
+            "sampled": False,
+            "limitations": [],
+        }
+
+    monkeypatch.setattr(
+        runtime.checks.provider, "metrica_direct_report", AsyncMock(side_effect=only_search)
+    )
+    report = await runtime.checks.metrica_report(client, make_period("7d"), "campaign")
+    by_id = {row["dimensions"][0]["id"]: row for row in report["rows"]}
+
+    assert set(by_id) == {"101", "102"}
+    assert by_id["102"]["current"] == {}
+    assert by_id["102"]["direct"]["current"]["spend"] is not None

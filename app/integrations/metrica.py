@@ -14,6 +14,13 @@ ATTRIBUTIONS = {
     "LSCCD": "cross_device_last_significant",
     "AUTO": "automatic",
 }
+DIRECT_REPORT_DIMENSIONS = {
+    "campaign": ("DirectClickOrder",),
+    "ad": ("DirectClickOrder", "DirectClickBanner"),
+    "condition": ("DirectClickOrder", "DirectPhraseOrCond"),
+    "search_phrase": ("DirectClickOrder", "DirectSearchPhrase"),
+    "platform": ("DirectClickOrder", "DirectPlatformType", "DirectPlatform"),
+}
 
 
 class MetricaAdapter:
@@ -138,6 +145,155 @@ class MetricaAdapter:
             "status": "ok" if rows else "no_data",
             "scope": "site_counter",
             "rows": rows[:20],
+            "limitations": limitations,
+        }
+
+    async def direct_report(
+        self, client, period, report_type, *, goal_ids=None, campaign_ids=None, limit=20
+    ):
+        """Build a validated campaign drill-down from Metrica's Reports API."""
+        if report_type not in DIRECT_REPORT_DIMENSIONS:
+            raise ValueError("unsupported_metrica_report")
+        campaign_ids = list(dict.fromkeys(str(value) for value in (campaign_ids or [])))
+        if len(campaign_ids) > 100 or any(not value.isdigit() for value in campaign_ids):
+            raise ValueError("invalid_campaign_ids")
+        configured = client.metrica.selected_counter_ids()
+        counters = configured or await campaign_counters(self.transport, client)
+        if not counters:
+            return {
+                "status": "not_checked",
+                "rows": [],
+                "limitations": ["В кампаниях не найден счётчик Метрики."],
+            }
+        counter_id = counters[0]
+        limitations = []
+        if len(counters) > 1:
+            limitations.append(
+                f"Для отчёта использован основной счётчик {counter_id}; "
+                f"ещё {len(counters) - 1} счётчиков требуют отдельного отчёта."
+            )
+        goals_data = await self.transport.json(
+            "metrica",
+            "GET",
+            f"{BASE_URL}/management/v1/counter/{counter_id}/goals",
+            headers=self.headers(client),
+        )
+        raw_goals = goals_data.get("goals")
+        if not isinstance(raw_goals, list):
+            raise IntegrationError("metrica", "invalid_goals_response")
+        available = {
+            str(value["id"]): redact(str(value.get("name") or value["id"]))[:150]
+            for value in raw_goals
+            if isinstance(value, dict) and "id" in value
+        }
+        requested = list(
+            dict.fromkeys(str(value) for value in (goal_ids or client.metrica.main_goal_ids))
+        )[:10]
+        missing = [value for value in requested if value not in available]
+        goals = [value for value in requested if value in available]
+        if missing:
+            limitations.append("Цели недоступны на выбранном счётчике: " + ", ".join(missing))
+        if not goals:
+            limitations.append(
+                "Основные цели не выбраны; отчёт содержит трафик и поведение без конверсий."
+            )
+
+        attribution = ATTRIBUTIONS[client.direct.attribution_model]
+        dimensions = [f"ym:s:{attribution}{name}" for name in DIRECT_REPORT_DIMENSIONS[report_type]]
+        base_metrics = [
+            "ym:s:visits",
+            "ym:s:users",
+            "ym:s:bounceRate",
+            "ym:s:pageDepth",
+            "ym:s:avgVisitDurationSeconds",
+        ]
+        batches = [base_metrics]
+        for start in range(0, len(goals), 9):
+            batch = ["ym:s:visits"]
+            for goal_id in goals[start : start + 9]:
+                batch.extend((f"ym:s:goal{goal_id}visits", f"ym:s:goal{goal_id}conversionRate"))
+            batches.append(batch)
+
+        metric_names = {
+            "ym:s:visits": "visits",
+            "ym:s:users": "users",
+            "ym:s:bounceRate": "bounce_rate",
+            "ym:s:pageDepth": "page_depth",
+            "ym:s:avgVisitDurationSeconds": "avg_visit_duration_seconds",
+        }
+        for goal_id in goals:
+            metric_names[f"ym:s:goal{goal_id}visits"] = f"goal_{goal_id}_visits"
+            metric_names[f"ym:s:goal{goal_id}conversionRate"] = f"goal_{goal_id}_conversion_rate"
+
+        merged, sampled, sample_share, total_rows = {}, False, number(1), 0
+        for metrics in batches:
+            params = {
+                "ids": counter_id,
+                "date1": str(period.start),
+                "date2": str(period.end),
+                "dimensions": ",".join(dimensions),
+                "metrics": ",".join(metrics),
+                "sort": "-ym:s:visits",
+                "accuracy": "full",
+                "include_undefined": "true",
+                "lang": "ru",
+                "limit": 1000
+                if report_type == "campaign" and not campaign_ids
+                else min(max(int(limit), 1), 50),
+            }
+            if campaign_ids:
+                params["filters"] = (
+                    f"ym:s:{attribution}DirectClickOrder=.(" + ",".join(campaign_ids) + ")"
+                )
+            data = await self.transport.json(
+                "metrica",
+                "GET",
+                BASE_URL + "/stat/v1/data",
+                headers=self.headers(client),
+                params=params,
+            )
+            query = data.get("query", {})
+            if query.get("date1") != str(period.start) or query.get("date2") != str(period.end):
+                raise IntegrationError("metrica", "period_mismatch")
+            sampled |= bool(data.get("sampled"))
+            if data.get("sample_share") is not None:
+                sample_share = min(sample_share, number(data["sample_share"]))
+            total_rows = max(total_rows, int(data.get("total_rows") or 0))
+            for item in data.get("data", []):
+                raw_dimensions = item.get("dimensions", [])
+                values = item.get("metrics", [])
+                if len(raw_dimensions) != len(dimensions) or len(values) != len(metrics):
+                    continue
+                cleaned = [
+                    {
+                        "id": str(value.get("id") or value.get("name") or "undefined")[:200],
+                        "name": redact(
+                            str(value.get("name") or value.get("id") or "Не определено")
+                        )[:200],
+                    }
+                    for value in raw_dimensions
+                ]
+                key = "|".join(value["id"] for value in cleaned)
+                row = merged.setdefault(key, {"key": key, "dimensions": cleaned, "metrics": {}})
+                for name, value in zip(metrics, values, strict=True):
+                    row["metrics"][metric_names[name]] = number(value)
+
+        if sampled:
+            limitations.append(f"Метрика применила семплирование: доля {sample_share}.")
+        rows = sorted(
+            merged.values(), key=lambda value: value["metrics"].get("visits") or 0, reverse=True
+        )
+        return {
+            "status": "insufficient" if limitations else "ok" if rows else "no_data",
+            "counter_id": counter_id,
+            "report": report_type,
+            "attribution": attribution,
+            "goals": [{"id": value, "name": available[value]} for value in goals],
+            "rows": rows,
+            "total_rows": total_rows,
+            "truncated": total_rows > len(rows),
+            "sampled": sampled,
+            "sample_share": sample_share,
             "limitations": limitations,
         }
 

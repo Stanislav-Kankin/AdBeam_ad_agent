@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -22,6 +24,7 @@ from app.domain.reports import (
     TriggerSource,
 )
 from app.reporting.formatter import brief, compact
+from app.storage.repository import safe_json
 
 logger = logging.getLogger(__name__)
 WAREHOUSE_DIMENSIONS = ("device", "geo", "search", "placement")
@@ -298,6 +301,131 @@ class CheckService:
         }
         await self.repository.save_analysis(client.id, period.current, "audience", result)
         return result
+
+    async def metrica_report(
+        self, client, period, report_type, *, goal_ids=None, campaign_ids=None, top_n=20
+    ):
+        options = {
+            "report": report_type,
+            "goals": sorted(goal_ids or client.metrica.main_goal_ids),
+            "campaigns": sorted(campaign_ids or []),
+            "top_n": top_n,
+        }
+
+        async def load(date_range):
+            digest = hashlib.sha256(
+                json.dumps(options, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:8]
+            kind = "mr" + digest
+            cached = await self.repository.cached_analysis(client.id, date_range, kind)
+            if cached is not None:
+                logger.info(
+                    "Metrica report cache hit client=%s report=%s period=%s..%s",
+                    client.id,
+                    report_type,
+                    date_range.start,
+                    date_range.end,
+                )
+                return cached
+            result = await self.provider.metrica_direct_report(
+                client,
+                date_range,
+                report_type,
+                goal_ids=goal_ids,
+                campaign_ids=campaign_ids,
+                limit=top_n,
+            )
+            result = safe_json(result)
+            if result.get("status") != "unavailable":
+                await self.repository.save_analysis(
+                    client.id, date_range, kind, result, ttl_hours=6
+                )
+            return result
+
+        current, previous = await asyncio.gather(load(period.current), load(period.previous))
+        now = {row["key"]: row for row in current.get("rows", [])}
+        before = {row["key"]: row for row in previous.get("rows", [])}
+        rows = []
+        for key in now.keys() | before.keys():
+            a, b = now.get(key), before.get(key)
+            current_metrics = (a or {}).get("metrics", {})
+            previous_metrics = (b or {}).get("metrics", {})
+            names = current_metrics.keys() | previous_metrics.keys()
+            rows.append(
+                {
+                    "key": key,
+                    "dimensions": (a or b)["dimensions"],
+                    "current": current_metrics,
+                    "previous": previous_metrics,
+                    "changes": {
+                        name: change(current_metrics.get(name), previous_metrics.get(name))
+                        for name in names
+                    },
+                }
+            )
+        if report_type == "campaign":
+            direct_current, direct_previous = await self.snapshots(client, period)
+            direct_now = {row.id: row for row in direct_current.direct.rows}
+            direct_before = {row.id: row for row in direct_previous.direct.rows}
+            if campaign_ids:
+                selected = set(campaign_ids)
+                direct_now = {key: value for key, value in direct_now.items() if key in selected}
+                direct_before = {
+                    key: value for key, value in direct_before.items() if key in selected
+                }
+            metrica_ids = {row["dimensions"][0]["id"] for row in rows}
+            for campaign_id in (direct_now.keys() | direct_before.keys()) - metrica_ids:
+                source = direct_now.get(campaign_id) or direct_before[campaign_id]
+                rows.append(
+                    {
+                        "key": campaign_id,
+                        "dimensions": [{"id": campaign_id, "name": source.name}],
+                        "current": {},
+                        "previous": {},
+                        "changes": {},
+                    }
+                )
+            for row in rows:
+                campaign_id = row["dimensions"][0]["id"]
+                a, b = direct_now.get(campaign_id), direct_before.get(campaign_id)
+                current_metrics = calculate(a.totals).model_dump(mode="json") if a else {}
+                previous_metrics = calculate(b.totals).model_dump(mode="json") if b else {}
+                row["direct"] = {
+                    "current": current_metrics,
+                    "previous": previous_metrics,
+                    "changes": {
+                        name: change(current_metrics.get(name), previous_metrics.get(name))
+                        for name in current_metrics.keys() | previous_metrics.keys()
+                    },
+                }
+            rows.sort(
+                key=lambda row: (
+                    row["direct"]["current"].get("spend") or row["current"].get("visits") or 0
+                ),
+                reverse=True,
+            )
+        else:
+            rows.sort(key=lambda row: row["current"].get("visits") or 0, reverse=True)
+        return {
+            "status": current.get("status", "unavailable"),
+            "report": report_type,
+            "period": period.model_dump(mode="json"),
+            "counter_id": current.get("counter_id"),
+            "attribution": current.get("attribution"),
+            "goals": current.get("goals", []),
+            "rows": rows[:top_n],
+            "total_rows": max(current.get("total_rows", len(now)), len(rows)),
+            "truncated": current.get("truncated", False) or len(rows) > top_n,
+            "sampled": current.get("sampled", False) or previous.get("sampled", False),
+            "limitations": list(
+                dict.fromkeys(
+                    [
+                        *current.get("limitations", []),
+                        *previous.get("limitations", []),
+                    ]
+                )
+            ),
+        }
 
     async def analyze(self, client, period, mode):
         logger.info("Check queued client=%s mode=%s", client.id, mode)

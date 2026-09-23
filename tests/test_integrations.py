@@ -245,6 +245,59 @@ async def test_metrica_rejects_wrong_dates_and_missing_totals(client, monkeypatc
             )
 
 
+async def test_metrica_direct_report_builds_campaign_goal_and_behavior_rows(client, monkeypatch):
+    monkeypatch.setenv("METRICA_OAUTH_TOKEN", "test-token")
+    period = make_period().current
+    requests = []
+
+    def handler(request):
+        if request.url.path.endswith("/goals"):
+            return httpx.Response(200, json={"goals": [{"id": 123456, "name": "Purchase"}]})
+        query = request.url.params
+        requests.append(query)
+        metrics = query["metrics"].split(",")
+        values = {
+            "ym:s:visits": 100,
+            "ym:s:users": 80,
+            "ym:s:bounceRate": 12.5,
+            "ym:s:pageDepth": 4.2,
+            "ym:s:avgVisitDurationSeconds": 180,
+            "ym:s:goal123456visits": 7,
+            "ym:s:goal123456conversionRate": 7,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "query": {"date1": str(period.start), "date2": str(period.end)},
+                "data": [
+                    {
+                        "dimensions": [{"id": "101", "name": "Search"}],
+                        "metrics": [values[name] for name in metrics],
+                    }
+                ],
+                "total_rows": 1,
+                "sampled": False,
+                "sample_share": 1,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await MetricaAdapter(ReadTransport(http)).direct_report(
+            client,
+            period,
+            "campaign",
+            goal_ids=["123456"],
+            campaign_ids=["101"],
+        )
+
+    assert len(requests) == 2
+    assert requests[0]["dimensions"] == "ym:s:lastDirectClickOrder"
+    assert requests[0]["filters"] == "ym:s:lastDirectClickOrder=.(101)"
+    assert result["rows"][0]["metrics"]["bounce_rate"] == Decimal("12.5")
+    assert result["rows"][0]["metrics"]["goal_123456_visits"] == 7
+    assert result["goals"] == [{"id": "123456", "name": "Purchase"}]
+
+
 async def test_roistat_aggregates_only_and_does_not_double_count(client, monkeypatch):
     monkeypatch.setenv("ROISTAT_API_KEY", "test-token")
     client.revenue = RevenueConfig(
