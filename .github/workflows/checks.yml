@@ -18,6 +18,8 @@ jobs:
       - run: pip install --no-deps -e .
       - run: ruff check app tests migrations
       - run: ruff format --check app tests migrations
-      - run: pytest -q
+      # Keep bot/scheduler event-loop fixtures isolated from the rest of the suite.
+      - run: pytest -q tests/test_bot_schedule.py
+      - run: pytest -q --ignore=tests/test_bot_schedule.py
       - run: docker build --target runtime -t adbeam-analyst:ci .
       - run: docker run --rm adbeam-analyst:ci demo
