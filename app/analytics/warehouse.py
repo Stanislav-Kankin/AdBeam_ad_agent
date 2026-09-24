@@ -16,6 +16,9 @@ def combined_status(values):
     values = list(values)
     if values and all(value == values[0] for value in values):
         return values[0]
+    # A day without impressions is complete data, not a gap: the period is OK.
+    if values and set(values) <= {DataStatus.OK, DataStatus.EMPTY}:
+        return DataStatus.OK
     return DataStatus.INSUFFICIENT
 
 
@@ -53,7 +56,10 @@ def combine_daily(snapshots: list[Snapshot], period):
     direct = DirectData(
         status=combined_status(item.direct.status for item in snapshots),
         period=period,
-        totals=aggregate([item.direct.totals for item in snapshots]),
+        # Empty days carry no totals at all; summing them would null the whole period.
+        totals=aggregate(
+            [item.direct.totals for item in snapshots if item.direct.status != DataStatus.EMPTY]
+        ),
         rows=[
             BreakdownRow(id=id_, name=direct_rows[id_], totals=aggregate(totals))
             for id_, totals in row_totals.items()

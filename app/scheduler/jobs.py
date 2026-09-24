@@ -205,6 +205,14 @@ class DailySchedule:
             f"Тестовый интервал: {settings.mock_schedule_interval_seconds or 'выключен'}"
         )
 
-    def close(self):
-        if self.scheduler.running:
-            self.scheduler.shutdown(wait=False)
+    async def close(self):
+        if not self.scheduler.running:
+            return
+        # APScheduler cancels running coroutine jobs on shutdown but cannot await them.
+        # A cancelled purge or warehouse job may still hold a database connection, so it
+        # must finish unwinding before the engine is disposed, or closing it deadlocks.
+        executor = self.scheduler._executors.get("default")
+        running = [f for f in getattr(executor, "_pending_futures", ()) if not f.done()]
+        self.scheduler.shutdown(wait=False)
+        if running:
+            await asyncio.wait(running, timeout=20)

@@ -66,8 +66,15 @@ def parse_tsv(text: str, goals: list[str], attribution: str, fields: list[str]):
 class DirectAdapter:
     def __init__(self, transport: ReadTransport):
         self.transport = transport
-        # One scheduled client uses two periods; leave capacity for an interactive report.
-        self.report_lock = asyncio.Semaphore(3)
+        # Direct queues offline reports per advertiser. A slot is held while a report is
+        # pending, so a shared global limit let one slow account block every other client.
+        self.report_locks = {}
+
+    def report_lock(self, client):
+        login = client.direct.client_login
+        if login not in self.report_locks:
+            self.report_locks[login] = asyncio.Semaphore(3)
+        return self.report_locks[login]
 
     def headers(self, client):
         token = secret_from_env(client.direct.token_env)
@@ -124,7 +131,7 @@ class DirectAdapter:
             dimension,
             page + 1,
         )
-        async with self.report_lock:
+        async with self.report_lock(client):
             response = await self.transport.request(
                 "direct",
                 "POST",

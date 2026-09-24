@@ -131,7 +131,7 @@ async def run_bot(runtime):
             menu_task.cancel()
             await asyncio.gather(pulse, menu_task, return_exceptions=True)
             # Drain jobs before the Bot session closes.
-            runtime.schedule.close()
+            await runtime.schedule.close()
             await runtime.jobs.close()
 
 

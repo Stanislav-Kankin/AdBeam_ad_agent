@@ -36,7 +36,7 @@ class Runtime:
 
     async def close(self):
         if self.schedule:
-            self.schedule.close()
+            await self.schedule.close()
         await self.jobs.close()
         if isinstance(self.agent.llm, DeepSeekProvider):
             await self.agent.llm.close()

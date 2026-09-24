@@ -75,27 +75,36 @@ class ProductionProvider:
             return {"rows": [], "limitations": [error_code(exc)], "status": "unavailable"}
 
     async def snapshot(self, client, period, *, quick=False):
-        stage(f"{client.name}: ожидаю отчёт Директа")
-        logger.info("Direct snapshot started client=%s period=%s", client.id, period)
-        try:
-            async with asyncio.timeout(60 if quick else 180):
-                direct = await self.direct.overview(client, period)
-        except TimeoutError:
-            direct = DirectData(
-                status=DataStatus.UNAVAILABLE,
-                period=period,
-                limitations=["Директ не ответил в отведённое время. Повторите запрос позже."],
-            )
-        logger.info("Direct snapshot finished client=%s status=%s", client.id, direct.status)
-        # Includes inactive/historical campaigns returned by Reports and campaign metadata.
-        ids = sorted({str(c["Id"]) for c in direct.campaigns} | {r.id for r in direct.rows})
+        stage(f"{client.name}: загружаю Директ и Метрику")
+
+        async def direct_overview():
+            logger.info("Direct snapshot started client=%s period=%s", client.id, period)
+            try:
+                async with asyncio.timeout(60 if quick else 180):
+                    result = await self.direct.overview(client, period)
+            except TimeoutError:
+                result = DirectData(
+                    status=DataStatus.UNAVAILABLE,
+                    period=period,
+                    limitations=["Директ не ответил в отведённое время. Повторите запрос позже."],
+                )
+            logger.info("Direct snapshot finished client=%s status=%s", client.id, result.status)
+            return result
+
+        # Counter-level Metrica totals do not depend on Direct campaign IDs, so both
+        # sources load concurrently; only campaign-scoped revenue waits for Direct.
+        direct_task = asyncio.create_task(direct_overview())
+
+        async def campaign_ids():
+            direct = await direct_task
+            # Includes inactive/historical campaigns returned by Reports and campaign metadata.
+            return sorted({str(c["Id"]) for c in direct.campaigns} | {r.id for r in direct.rows})
 
         async def metrica():
             try:
-                stage(f"{client.name}: загружаю Метрику и цели")
                 async with asyncio.timeout(45 if quick else 180):
                     return await self.metrica.overview(
-                        client, period, ids, budget=35 if quick else 165
+                        client, period, None, budget=35 if quick else 165
                     )
             except TimeoutError:
                 logger.warning("Metrica deadline exceeded client=%s quick=%s", client.id, quick)
@@ -122,7 +131,7 @@ class ProductionProvider:
                 )
             try:
                 if source == "metrica_ecommerce":
-                    return await self.metrica.revenue(client, period, ids)
+                    return await self.metrica.revenue(client, period, await campaign_ids())
                 return await self.roistat.revenue(client, period)
             except Exception as exc:
                 return RevenueData(
@@ -144,7 +153,13 @@ class ProductionProvider:
                     reason="Истекло время загрузки выручки.",
                 )
 
-        metrica_data, revenue_data = await asyncio.gather(metrica(), bounded_revenue())
+        try:
+            metrica_data, revenue_data = await asyncio.gather(metrica(), bounded_revenue())
+            direct = await direct_task
+        finally:
+            if not direct_task.done():
+                direct_task.cancel()
+                await asyncio.gather(direct_task, return_exceptions=True)
         logger.info("Snapshot finished client=%s metrica=%s", client.id, metrica_data.status)
         if (
             metrica_data.status == DataStatus.UNAVAILABLE

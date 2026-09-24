@@ -25,7 +25,9 @@ async def test_polling_starts_while_command_registration_stalls(runtime, monkeyp
     bot.set_my_commands.side_effect = stall
     bot.__aenter__.return_value = bot
     monkeypatch.setattr(main, "Bot", MagicMock(return_value=bot))
-    monkeypatch.setattr(main, "DailySchedule", MagicMock())
+    schedule = MagicMock()
+    schedule.return_value.close = AsyncMock()
+    monkeypatch.setattr(main, "DailySchedule", schedule)
     monkeypatch.setattr(main, "heartbeat", stall)
     dp = MagicMock()
 
