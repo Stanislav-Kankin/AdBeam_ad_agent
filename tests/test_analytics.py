@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from app.analytics.diagnostics import report_level, snapshot_metrics
 from app.analytics.metrics import aggregate, calculate, change, expected_budget
 from app.analytics.periods import MOSCOW, AnalysisPeriod, DateRange, make_period
-from app.analytics.rules import evaluate, tracking_health
+from app.analytics.rules import conversion_maturity, evaluate, tracking_health
 from app.analytics.warehouse import combine_daily
 from app.domain.clients import Targets
 from app.domain.reports import (
@@ -151,6 +151,46 @@ async def test_cpa_growth_without_target_is_signalled(runtime):
         client, current, previous, period, {"healthy": True, "reasons": []}, snapshot
     )
     assert any(s.type == "cpa_change" for s in signals)
+
+
+@pytest.mark.parametrize(
+    ("period", "usable", "fresh"),
+    [("14d", True, 3), ("30d", True, 3), ("7d", False, 3), ("yesterday", False, 1)],
+)
+def test_only_the_trailing_delay_days_are_preliminary(period, usable, fresh):
+    today = date(2026, 9, 24)
+    targets = Targets(conversion_delay_days=3)
+    assert conversion_maturity(make_period(period, today).current, targets, today) == (
+        usable,
+        fresh,
+    )
+    old = DateRange(start=date(2026, 9, 1), end=date(2026, 9, 14))
+    assert conversion_maturity(old, targets, today) == (True, 0)
+
+
+async def test_recent_14_days_still_flag_cpa_growth(runtime):
+    # Grand Line case: CPA +11.5% over the last 14 days must not be grey.
+    base = runtime.registry.clients["grand_line"]
+    client = base.model_copy(
+        update={
+            "targets": base.targets.model_copy(
+                update={"target_cpa": None, "conversion_delay_days": 3}
+            )
+        }
+    )
+    period = make_period("14d")
+    snapshot, _ = await runtime.checks.snapshots(client, period)
+    current = calculate(
+        Totals(spend=Decimal("2168241"), impressions=3084288, clicks=96941, conversions=1038)
+    )
+    previous = calculate(
+        Totals(spend=Decimal("1811654"), impressions=2309694, clicks=72491, conversions=967)
+    )
+    signals = evaluate(
+        client, current, previous, period, {"healthy": True, "reasons": []}, snapshot
+    )
+    assert any(s.type == "cpa_change" for s in signals)
+    assert report_level(client, signals, current, previous, reliable=True) == "yellow"
 
 
 async def test_kpi_profile_keeps_goals_and_warehouse(runtime, client):

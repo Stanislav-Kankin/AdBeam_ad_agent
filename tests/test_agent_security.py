@@ -66,7 +66,7 @@ async def test_tool_parameters_validated_and_audited(runtime, name, args):
 
 async def test_multistep_model_and_audit(runtime):
     reply = await runtime.agent.ask("Почему у West Экспорт вырос CPA за 7 дней?", 123456789, 1)
-    assert "4 000,00" in reply and "MOCK" in reply
+    assert "4 000" in reply and "MOCK" in reply
     async with runtime.checks.repository.sessions() as session:
         events = (await session.scalars(select(ToolEvent))).all()
         assert [e.tool for e in events] == ["list_clients", "get_account_overview"]
@@ -198,7 +198,7 @@ async def test_llm_failure_preserves_deterministic_report(runtime):
     ]
     service = AgentService(runtime.checks, llm)
     answer = await service.ask("West Экспорт", 123456789, 1)
-    assert "DeepSeek недоступен" in answer and "4 000,00" in answer
+    assert "DeepSeek недоступен" in answer and "4 000" in answer
     assert "secret must not escape" not in answer
 
 

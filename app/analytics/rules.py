@@ -11,6 +11,22 @@ CONTEXT_SIGNALS = frozenset({"campaign_states"})
 VOLUME_SIGNALS = frozenset({"spend_change", "cpc_change", "cr_drop", "device_cr_drop"})
 
 
+# Share of the period that may still receive late conversions and still allows signals.
+PRELIMINARY_SHARE = Decimal("0.25")
+
+
+def conversion_maturity(period, targets, today=None) -> tuple[bool, int]:
+    """(signals allowed, number of trailing days whose conversions may still grow).
+
+    Only the last ``conversion_delay_days`` days are incomplete. Suppressing every
+    signal for "last N days" periods made recent reports permanently grey, so a period
+    stays usable while the incomplete tail is at most a quarter of it.
+    """
+    since_end = ((today or today_moscow()) - period.end).days
+    fresh = min(max(0, targets.conversion_delay_days + 1 - since_end), period.days)
+    return Decimal(fresh) / period.days <= PRELIMINARY_SHARE, fresh
+
+
 def main_kpi(client) -> str | None:
     """The KPI that decides the account status; other changes are context."""
     targets = client.targets
@@ -136,7 +152,7 @@ def evaluate(
         )
     enough = current.spend is not None and current.spend >= targets.minimum_spend_for_analysis
     traffic = (current.clicks or 0) >= targets.minimum_clicks
-    mature = ((today or today_moscow()) - period.current.end).days > targets.conversion_delay_days
+    mature, _ = conversion_maturity(period.current, targets, today)
     conversion_ready = enough and traffic and mature and tracking["healthy"]
     threshold = targets.minimum_spend_for_analysis
     if targets.target_cpa:

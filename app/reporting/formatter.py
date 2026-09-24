@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from app.analytics.periods import DateRange
 from app.analytics.rules import CONTEXT_SIGNALS, VOLUME_SIGNALS
 from app.domain.reports import ClientReport, DirectData
 from app.security import redact
@@ -47,7 +48,8 @@ AUDIENCE_NAMES = {
 def fmt(value):
     if value is None:
         return "не рассчитано"
-    return f"{Decimal(value):,.2f}".replace(",", " ").replace(".", ",")
+    # Up to two decimals without trailing zeros: 3 084 288, not 3 084 288,00.
+    return number_text(value, 2)
 
 
 def fmt_short(value, *, money=False):
@@ -461,7 +463,7 @@ def audience_report(client_name, payload) -> str:
     period = payload["period"]
     lines = [
         f"👥 Аудитория · {client_name}",
-        f"Период: {period['start']}–{period['end']}",
+        "Период: " + DateRange(start=period["start"], end=period["end"]).label(),
         "",
         "Рекламный трафик Директа:",
     ]
@@ -481,10 +483,10 @@ def audience_report(client_name, payload) -> str:
                 if row.totals.spend is not None and (row.totals.conversions or 0) > 0
                 else None
             )
-            suffix = f"; CPA {fmt_short(cpa, money=True)} ₽" if cpa is not None else ""
+            suffix = f"; CPA {value_text('cpa', cpa)}" if cpa is not None else ""
             lines.append(
                 f"• {AUDIENCE_NAMES.get(row.name, row.name)}: "
-                f"{fmt_short(share, money=True)}% кликов{suffix}"
+                f"{number_text(share, 1)}% кликов{suffix}"
             )
 
     interests = payload.get("interests", {})

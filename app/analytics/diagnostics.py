@@ -12,6 +12,7 @@ from app.analytics.progress import stage
 from app.analytics.rules import (
     CONTEXT_SIGNALS,
     VOLUME_SIGNALS,
+    conversion_maturity,
     evaluate,
     kpi_stable,
     main_kpi,
@@ -498,12 +499,15 @@ class CheckService:
             ]
             if not health["healthy"]:
                 limitations.append("CPA и CR не рассчитаны: доступность аналитики не подтверждена.")
-            mature = (
-                today_moscow() - period.current.end
-            ).days > client.targets.conversion_delay_days
+            mature, fresh_days = conversion_maturity(period.current, client.targets)
             if not mature:
                 limitations.append(
                     f"Конверсии могут дополняться {client.targets.conversion_delay_days} дн.; сигналы CPA/CR и расхода без конверсий подавлены."
+                )
+            elif fresh_days:
+                limitations.append(
+                    f"Конверсии могут дополняться за последние {fresh_days} дн. периода; "
+                    "CPA и CR предварительные и могут немного улучшиться."
                 )
             if (
                 current.revenue.status != DataStatus.OK

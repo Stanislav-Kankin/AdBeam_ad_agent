@@ -98,5 +98,5 @@ async def test_report_delta_survives_json_and_explains_direction(runtime, client
     report.changes["ctr"] = {"absolute": "1", "percent": "25"}
     text = detailed(report)
     assert "сейчас " in text and "; раньше " in text
-    assert "изменение +1,00 п.п.; относительно прошлого периода +25,00%" in text
+    assert "изменение +1 п.п.; относительно прошлого периода +25%" in text
     assert "←" not in text
