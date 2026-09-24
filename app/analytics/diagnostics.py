@@ -545,6 +545,13 @@ class CheckService:
                         client.targets.target_cpa
                         * Decimal(str(client.targets.no_conversion_cpa_multiple)),
                     )
+                # A segment only counts as spending "without conversions" once it spent the
+                # price of several average conversions of this account: 3 000 ₽ is noise
+                # for an account with a 2 000 ₽ CPA and millions in spend.
+                if a.cpa is not None:
+                    threshold = max(
+                        threshold, a.cpa * Decimal(str(client.targets.no_conversion_cpa_multiple))
+                    )
                 if mature and health["healthy"]:
                     for row in current.direct.rows:
                         if (
@@ -552,14 +559,18 @@ class CheckService:
                             and (row.totals.spend or 0) >= threshold
                             and (row.totals.clicks or 0) >= client.targets.minimum_clicks
                         ):
+                            share = row.totals.spend / a.spend * 100 if a.spend else Decimal(100)
                             signals.append(
                                 Signal(
                                     type="campaign_without_conversions",
-                                    level="red",
+                                    # Critical only when it burns a real part of the budget.
+                                    level="red" if share >= 10 else "yellow",
                                     message=f"Кампания «{row.name}» расходует без основных конверсий.",
                                     actual={
                                         "campaign_id": row.id,
+                                        "name": row.name,
                                         "spend": row.totals.spend,
+                                        "share_percent": share,
                                         "conversions": 0,
                                     },
                                     period=period,

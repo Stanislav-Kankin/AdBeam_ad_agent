@@ -230,7 +230,9 @@ def evaluate(
             add(
                 "cpa_change",
                 "yellow",
-                f"CPA вырос на {cpa_delta:.1f}% относительно прошлого периода.",
+                f"CPA вырос на {cpa_delta:.1f}% относительно прошлого периода.".replace(
+                    ".", ",", 1
+                ),
                 {
                     "current": current.cpa,
                     "previous": previous.cpa,

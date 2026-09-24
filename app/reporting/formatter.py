@@ -213,6 +213,42 @@ def expensive_campaigns(report, limit=3):
     return risks[:limit]
 
 
+def plural(count, one, few, many):
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return few
+    return many
+
+
+def waste_line(report, signals, limit=3):
+    """One risk line for all campaigns that spent without primary conversions."""
+    rows = sorted(
+        (
+            (s.actual.get("name") or s.message, Decimal(str(s.actual.get("spend") or 0)))
+            for s in signals
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    total = sum((spend for _, spend in rows), Decimal(0))
+    if len(rows) == 1:
+        name, spend = rows[0]
+        return f"«{name}» потратила {value_text('spend', spend)} без основных конверсий."
+    count = len(rows)
+    share = (
+        f" ({number_text(total / Decimal(report.current.spend) * 100, 1)}% расхода)"
+        if report.current.spend
+        else ""
+    )
+    top = ", ".join(f"«{name}» {value_text('spend', spend)}" for name, spend in rows[:limit])
+    more = f" и ещё {count - limit}" if count > limit else ""
+    return (
+        f"Без основных конверсий {count} {plural(count, 'кампания', 'кампании', 'кампаний')} "
+        f"на {value_text('spend', total)}{share}: {top}{more}."
+    )
+
+
 def conclusion(report):
     """Deterministic one-to-two sentence conclusion; the model may replace it."""
     if report.source_status.get("Директ") == "no_data":
@@ -280,11 +316,14 @@ def card(report: ClientReport, summary: str | None = None) -> str:
     alerts = [
         s for s in report.signals if s.type not in contextual and s.type != "tracking" and s.message
     ]
-    # Concrete places (a named campaign) come right after critical alerts, before
-    # account-level yellow signals, so the reader sees where the problem is.
-    risks = [s.message for s in alerts if s.level == "red"]
+    # Order: what happened to the account KPI, then where (expensive campaigns),
+    # then waste. Campaigns without conversions collapse into one line with amounts.
+    waste = [s for s in alerts if s.type == "campaign_without_conversions"]
+    account = [s for s in alerts if s.type != "campaign_without_conversions"]
+    risks = [s.message for s in sorted(account, key=lambda s: s.level != "red")]
     risks += expensive_campaigns(report)
-    risks += [s.message for s in alerts if s.level != "red"]
+    if waste:
+        risks.append(waste_line(report, waste))
     tracking = next((s for s in report.signals if s.type == "tracking"), None)
     if tracking:
         risks += tracking.actual.get("reasons", [])[:1]

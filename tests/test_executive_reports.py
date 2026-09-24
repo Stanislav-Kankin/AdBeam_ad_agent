@@ -1,5 +1,6 @@
 import hashlib
 import json
+from decimal import Decimal
 
 from app.analytics.periods import make_period
 from app.domain.reports import CheckMode, TriggerSource
@@ -37,6 +38,54 @@ async def test_card_shows_delta_before_values_and_hides_noise(runtime, client):
     assert clicks.startswith("Клики: **стабильно**")
     spend = next(line for line in main.splitlines() if line.startswith("Расход:"))
     assert spend.index("**") < spend.index("₽")
+
+
+async def test_card_groups_small_campaigns_without_conversions(runtime, client):
+    from app.domain.reports import Signal
+
+    report = await runtime.checks.analyze(client, make_period("7d"), CheckMode.STANDARD)
+    report.current.spend = Decimal(2_168_241)
+
+    def signal(type_, level, message, **actual):
+        return Signal(
+            type=type_,
+            level=level,
+            message=message,
+            actual=actual,
+            period=report.period,
+            evidence="",
+            confidence="high",
+            sufficient_data=True,
+            next_check="",
+        )
+
+    report.signals = [
+        signal(
+            "campaign_without_conversions",
+            "yellow",
+            f"Кампания «C{i}» расходует без основных конверсий.",
+            name=f"C{i}",
+            spend=spend,
+        )
+        for i, spend in enumerate((12400, 9800, 7600, 5200, 4300), 1)
+    ] + [signal("cpa_change", "yellow", "CPA вырос на 11,5% относительно прошлого периода.")]
+    report.drivers = []
+    text = card(report)
+    risks = text.split("Требует внимания**")[1].split("\n\n")[0].strip().splitlines()
+    assert risks[0] == "1. CPA вырос на 11,5% относительно прошлого периода."
+    assert risks[1] == (
+        "2. Без основных конверсий 5 кампаний на 39 300 ₽ (1,8% расхода): "
+        "«C1» 12 400 ₽, «C2» 9 800 ₽, «C3» 7 600 ₽ и ещё 2."
+    )
+
+
+async def test_small_campaign_without_conversions_is_not_critical(runtime):
+    client = runtime.registry.clients["west_export"]
+    report = await runtime.checks.analyze(client, make_period("7d"), CheckMode.STANDARD)
+    waste = [s for s in report.signals if s.type == "campaign_without_conversions"]
+    assert waste
+    for s in waste:
+        assert s.level == ("red" if s.actual["share_percent"] >= 10 else "yellow")
 
 
 async def test_card_names_expensive_campaign(runtime, client):
