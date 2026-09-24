@@ -164,8 +164,11 @@ def build_dispatcher(runtime):
             if not runtime.jobs.start((chat_id, user_id), work, failed):
                 await callback.message.answer("Другой запрос уже выполняется. Попробуйте позже.")
             return
-        text = specialist if view == "specialist" else technical
-        await send_text(callback.message.bot, chat_id, text)
+        # The campaigns view is Markdown (bold names); the technical view is plain text.
+        if view == "specialist":
+            await send_text(callback.message.bot, chat_id, specialist, markdown=True)
+        else:
+            await send_text(callback.message.bot, chat_id, technical)
 
     def client_label(client):
         name = client.name.strip()

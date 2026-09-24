@@ -208,6 +208,38 @@ async def test_single_client_check_offers_on_demand_technical_details(runtime):
     assert "Рекламный трафик Директа:" in audience
 
 
+async def test_campaigns_view_renders_markdown_not_asterisks(runtime):
+    from aiogram.types import CallbackQuery
+
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+        await dp.feed_update(bot, message_update('/check "West Экспорт" 7d'))
+        await runtime.jobs.close()
+        offer = next(
+            item
+            for item in session.sent
+            if isinstance(item, SendMessage) and item.text == "Дополнительные данные"
+        )
+        callback = CallbackQuery(
+            id="campaigns",
+            from_user=User(id=1, is_bot=False, first_name="User"),
+            chat_instance="test",
+            message=message_update("details").message,
+            data=offer.reply_markup.inline_keyboard[0][0].callback_data,
+        )
+        before = len(session.sent)
+        await dp.feed_update(bot, Update(update_id=2, callback_query=callback))
+
+    sent = [item for item in session.sent[before:] if isinstance(item, SendMessage)]
+    assert sent and "Кампании" in sent[0].text
+    assert all("**" not in item.text for item in sent)
+    assert any(entity.type == "bold" for item in sent for entity in item.entities or [])
+    # The main card is Markdown too: no literal asterisks in anything the bot sent.
+    texts = [getattr(item, "text", None) or "" for item in session.sent]
+    assert all("**" not in text for text in texts)
+
+
 async def test_unknown_chats_silent(runtime):
     session = FakeTelegram()
     async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
