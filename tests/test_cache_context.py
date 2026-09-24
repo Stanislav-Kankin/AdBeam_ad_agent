@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 from app.analytics.periods import DateRange, make_period, today_moscow
 from app.domain.reports import CheckMode
 from app.integrations.deepseek import LLMMessage
+from app.reporting.formatter import card
 
 
 async def test_snapshots_are_reused_for_same_client_and_period(runtime, client):
@@ -141,11 +142,13 @@ async def test_model_edits_ready_report_without_tools(runtime, client):
 
     report = await runtime.checks.analyze(client, make_period("7d"), CheckMode.STANDARD)
     llm = AsyncMock()
-    llm.complete.return_value = LLMMessage(content="**Расход:** 84 000 ₽\nСледующий шаг.")
+    llm.complete.return_value = LLMMessage(content="**CPA** в норме, рост дали брендовые кампании.")
     service = AgentService(runtime.checks, llm)
     text, markdown = await service.explain_reports([report], "Расход: 84 000 ₽", 123456789, 9)
     assert markdown
-    assert text.startswith("**Расход:**")
+    # The model writes only the conclusion; the card structure stays deterministic.
+    assert "CPA в норме, рост дали брендовые кампании." in text
+    assert "**Показатели**" in text
     assert llm.complete.await_args.args[1] == []
     context = await runtime.checks.repository.conversation(123456789, 9)
     assert context["active_client_id"] == client.id
@@ -160,8 +163,8 @@ async def test_model_editor_failure_returns_deterministic_report(runtime, client
     text, markdown = await AgentService(runtime.checks, llm).explain_reports(
         [report], "Надёжный отчёт", 123456789, 9
     )
-    assert text == "Надёжный отчёт"
-    assert not markdown
+    assert text == card(report)
+    assert markdown
 
 
 async def test_daily_digest_editor_stays_compact(runtime):

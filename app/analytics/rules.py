@@ -4,25 +4,65 @@ from app.analytics.metrics import change, expected_budget
 from app.analytics.periods import today_moscow
 from app.domain.reports import DataStatus, Metrics, Signal, Snapshot
 
+# Always context: current campaign states do not explain a past period by themselves.
+CONTEXT_SIGNALS = frozenset({"campaign_states"})
+# Context only while the main KPI is stable: volume and funnel shifts that did not
+# move the project KPI are worth showing but not worth an alert.
+VOLUME_SIGNALS = frozenset({"spend_change", "cpc_change", "cr_drop", "device_cr_drop"})
+
+
+def main_kpi(client) -> str | None:
+    """The KPI that decides the account status; other changes are context."""
+    targets = client.targets
+    if targets.kpi:
+        return targets.kpi
+    if targets.target_drr:
+        return "drr"
+    return "cpa" if client.direct.main_goal_ids else None
+
+
+def kpi_stable(client, current: Metrics, previous: Metrics) -> bool:
+    """True when the main KPI stayed within tolerance or improved, and meets its target."""
+    kpi, targets = main_kpi(client), client.targets
+    if kpi is None:
+        return False
+    tolerance = Decimal(str(targets.kpi_change_tolerance_percent))
+    now, before = getattr(current, kpi), getattr(previous, kpi)
+    delta = change(now, before)["percent"]
+    if now is None or delta is None:
+        return False
+    if kpi == "conversions":
+        return delta >= -tolerance
+    target = targets.target_cpa if kpi == "cpa" else targets.target_drr
+    # Lower CPA/ДРР is better: only growth beyond the noise tolerance is a change.
+    return delta <= tolerance and (target is None or now <= target * (1 + tolerance / 100))
+
 
 def tracking_health(client, current: Snapshot, previous: Snapshot, period) -> dict:
-    reasons = []
+    # Direct conversions come from Direct Reports, not from Metrica. Metrica problems are
+    # warnings about site data and must not hide CPA/CR calculated by Direct.
+    reasons, warnings = [], []
     if current.direct.status == DataStatus.EMPTY:
         reasons.append("Директ не вернул строк статистики за выбранный период.")
     elif current.direct.status != DataStatus.OK:
         reasons.append("Данные Директа недоступны, отсутствуют или неполные.")
-    if current.metrica.status == DataStatus.INSUFFICIENT:
-        reasons.extend(current.metrica.limitations or ["Данные Метрики получены с ограничениями."])
-    elif current.metrica.status != DataStatus.OK:
-        reasons.append("Данные Метрики недоступны, отсутствуют или неполные.")
-    if not client.metrica.main_goal_ids or current.metrica.missing_goal_ids:
-        reasons.append("Основные цели не настроены или отсутствуют в счётчике.")
-    if client.direct.main_goal_ids and current.direct.totals.conversions is None:
+    if not client.direct.main_goal_ids:
+        reasons.append("Основные цели не выбраны: конверсии, CPA и CR не рассчитываются.")
+    elif current.direct.totals.conversions is None:
         reasons.append("Директ не вернул достоверную статистику основных конверсий.")
+    if current.direct.period != period.current:
+        reasons.append("Период Директа не совпадает с запросом.")
+    if current.metrica.status == DataStatus.INSUFFICIENT:
+        warnings.extend(current.metrica.limitations or ["Данные Метрики получены с ограничениями."])
+    elif current.metrica.status not in (DataStatus.OK, DataStatus.NOT_CHECKED):
+        warnings.append("Данные Метрики недоступны, отсутствуют или неполные.")
+    if current.metrica.missing_goal_ids:
+        warnings.append(
+            "Основные цели отсутствуют в счётчике Метрики: "
+            + ", ".join(current.metrica.missing_goal_ids)
+        )
     if current.metrica.sampled:
-        reasons.append("Метрика вернула выборочные данные.")
-    if current.direct.period != period.current or current.metrica.period != period.current:
-        reasons.append("Период источника не совпадает с запросом.")
+        warnings.append("Метрика вернула выборочные данные.")
     previous_conversions = previous.direct.totals.conversions
     goal_values = [
         Decimal(g["reaches"])
@@ -44,6 +84,7 @@ def tracking_health(client, current: Snapshot, previous: Snapshot, period) -> di
         "status": "no_problems_detected" if not reasons else "needs_verification",
         "healthy": not reasons,
         "reasons": reasons,
+        "warnings": list(dict.fromkeys(warnings)),
         "direct": current.direct.status,
         "metrica": current.metrica.status,
         "main_goal_ids": client.metrica.main_goal_ids,
@@ -159,6 +200,28 @@ def evaluate(
                     "tolerance_percent": targets.kpi_change_tolerance_percent,
                 },
                 "Изменение CPA превысило настроенный порог статистического шума.",
+                "Проверить кампании с наибольшим ростом расхода и стоимости конверсии.",
+            )
+    elif conversion_ready and current.cpa is not None and main_kpi(client) == "cpa":
+        # No target CPA: the main KPI is still watched against the previous period.
+        cpa_delta = change(current.cpa, previous.cpa)["percent"]
+        tolerance = Decimal(str(targets.kpi_change_tolerance_percent))
+        if (
+            cpa_delta is not None
+            and cpa_delta > tolerance
+            and (previous.conversions or 0) >= targets.minimum_conversions
+        ):
+            add(
+                "cpa_change",
+                "yellow",
+                f"CPA вырос на {cpa_delta:.1f}% относительно прошлого периода.",
+                {
+                    "current": current.cpa,
+                    "previous": previous.cpa,
+                    "percent": cpa_delta,
+                    "tolerance_percent": targets.kpi_change_tolerance_percent,
+                },
+                "Главный KPI проекта вырос больше допуска; целевой CPA не задан.",
                 "Проверить кампании с наибольшим ростом расхода и стоимости конверсии.",
             )
     cpc_delta = change(current.cpc, previous.cpc)["percent"]

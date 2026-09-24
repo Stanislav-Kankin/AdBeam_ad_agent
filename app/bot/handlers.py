@@ -18,7 +18,7 @@ from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities, retry_telegram
 from app.domain.reports import CheckMode, ClientReport, TriggerSource
 from app.reporting.charts import render_dynamics
-from app.reporting.formatter import audience_report, detailed, executive, split_message
+from app.reporting.formatter import audience_report, campaigns_view, detailed, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def build_dispatcher(runtime):
             monotonic(),
             message.chat.id,
             user_id,
-            executive(reports[0]),
+            campaigns_view(reports[0]),
             detailed(reports[0]),
             reports[0].client_id,
             reports[0].period.model_dump(mode="json"),
@@ -94,7 +94,7 @@ def build_dispatcher(runtime):
                         inline_keyboard=[
                             [
                                 InlineKeyboardButton(
-                                    text="📈 Показатели и причины",
+                                    text="📈 Кампании",
                                     callback_data=f"details:{token}:specialist",
                                 )
                             ],

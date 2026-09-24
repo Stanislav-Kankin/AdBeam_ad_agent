@@ -3,7 +3,7 @@ import json
 
 from app.analytics.periods import make_period
 from app.domain.reports import CheckMode, TriggerSource
-from app.reporting.formatter import audience_report, brief, compact, detailed, executive
+from app.reporting.formatter import audience_report, campaigns_view, card, compact, detailed
 
 
 async def test_single_client_report_separates_decisions_from_diagnostics(runtime, client):
@@ -15,19 +15,43 @@ async def test_single_client_report_separates_decisions_from_diagnostics(runtime
         ]
     )
 
-    main = executive(report)
+    main = card(report)
+    campaigns = campaigns_view(report)
     technical = detailed(report)
 
-    assert "Основное изменение:" in main
-    assert "Динамика показателей:" in main
-    assert "Что сделать:" in main
-    assert "Полнота данных:" in main
+    assert "**Показатели** · изменение · сейчас / было" in main
+    assert "Данные:" in main
+    assert "Требует внимания" in main or "Рисков не найдено" in main
     assert "HTTP 429" not in main
     assert "HTTP 429" in technical
+    assert ".00" not in main and ",00 ₽" not in main
+    assert len(main) < 2000
+    assert "Кампании" in campaigns and "CPA" in campaigns
 
-    overview = brief(report)
-    assert len(overview.split("\n\n")) == 2
-    assert len(overview) < 1000
+
+async def test_card_shows_delta_before_values_and_hides_noise(runtime, client):
+    report = await runtime.checks.analyze(client, make_period("7d"), CheckMode.STANDARD)
+    report.changes["clicks"]["percent"] = 2
+    main = card(report)
+    clicks = next(line for line in main.splitlines() if line.startswith("Клики:"))
+    assert clicks.startswith("Клики: **стабильно**")
+    spend = next(line for line in main.splitlines() if line.startswith("Расход:"))
+    assert spend.index("**") < spend.index("₽")
+
+
+async def test_card_names_expensive_campaign(runtime, client):
+    report = await runtime.checks.analyze(client, make_period("7d"), CheckMode.STANDARD)
+    report.current.cpa, report.current.spend = 1000, 100000
+    report.drivers = [
+        {
+            "id": "1",
+            "name": "Кровля (поиск)",
+            "spend_delta": 25840,
+            "current": {"spend": 28180, "cpa": 14090, "conversions": 2},
+            "previous": {"spend": 2340, "cpa": 2340, "conversions": 1},
+        }
+    ]
+    assert "«Кровля (поиск)»: CPA 14 090 ₽" in card(report)
 
 
 async def test_portfolio_report_is_ranked_and_bounded(runtime):

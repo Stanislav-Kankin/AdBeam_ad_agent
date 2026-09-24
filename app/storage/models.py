@@ -75,6 +75,7 @@ class ClientPreference(Base):
     selected_counter_ids: Mapped[list] = mapped_column(JSON, default=list)
     primary_goal_ids: Mapped[list] = mapped_column(JSON, default=list)
     goal_roles: Mapped[dict] = mapped_column(JSON, default=dict)
+    targets: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     updated_by: Mapped[str | None] = mapped_column(String(30))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 

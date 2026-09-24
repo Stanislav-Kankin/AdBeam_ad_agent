@@ -208,7 +208,7 @@ async def test_llm_failure_before_tools_still_checks_explicit_client(runtime):
     answer = await AgentService(runtime.checks, llm).ask(
         "Проверь West Экспорт за 7 дней", 123456789, 1
     )
-    assert "DeepSeek недоступен" in answer and "84 000,00" in answer
+    assert "DeepSeek недоступен" in answer and "84 000 ₽" in answer
 
 
 async def test_llm_failure_understands_two_month_period(runtime):

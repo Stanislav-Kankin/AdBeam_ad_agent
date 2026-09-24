@@ -164,6 +164,8 @@ class AgentService:
 
     async def explain_reports(self, reports, deterministic_text, chat_id, user_id=None):
         """Use the model as an editor over backend-calculated facts, never as a calculator."""
+        if len(reports) == 1:
+            return await self.explain_card(reports[0], chat_id, user_id)
         if not self.llm or not reports:
             return deterministic_text, False
         request_id = str(uuid4())
@@ -210,6 +212,54 @@ class AgentService:
         except Exception as exc:
             logger.warning("Report narration failed error=%s", type(exc).__name__)
             return deterministic_text, False
+
+    async def explain_card(self, report, chat_id, user_id=None):
+        """The card structure is fixed; the model only writes its short conclusion."""
+        from app.reporting.formatter import card
+
+        text = card(report)
+        if not self.llm:
+            return text, True
+        request_id = str(uuid4())
+        if self.daily_limit is not None and not await self.checks.repository.reserve_model_call(
+            chat_id, user_id, request_id, self.daily_limit
+        ):
+            return text, True
+        system = (
+            "Ты старший performance-аналитик агентства. По готовой карточке клиента напиши "
+            "вывод для специалиста: 1–2 предложения, не длиннее 300 знаков. Используй только "
+            "факты и числа из карточки, ничего не пересчитывай. Сначала состояние главного KPI, "
+            "затем главное, что на него повлияло или что требует внимания. Изменения с пометкой "
+            "«стабильно» не акцентируй. Гипотезу называй гипотезой. Без Markdown, списков и "
+            "заголовков. Не повторяй список показателей."
+        )
+        try:
+            async with asyncio.timeout(45):
+                reply = await self.llm.complete(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": text[:16000]},
+                    ],
+                    [],
+                )
+            summary = redact(reply.content.strip())
+            if reply.calls or not summary or len(summary) > 500:
+                return text, True
+            answer = card(report, summary=summary)
+            await self.checks.repository.save_conversation(
+                chat_id,
+                user_id,
+                [
+                    {"role": "user", "content": "Подготовь аналитический отчёт."},
+                    {"role": "assistant", "content": answer[:4000]},
+                ],
+                active_client_id=report.client_id,
+                period=report.period.model_dump(mode="json"),
+            )
+            return answer, True
+        except Exception as exc:
+            logger.warning("Report narration failed error=%s", type(exc).__name__)
+            return text, True
 
     async def explain_daily_digest(self, deterministic_text, chat_id):
         """Polish a compact scheduled digest without expanding it into a full report."""

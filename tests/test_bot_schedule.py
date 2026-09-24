@@ -168,7 +168,7 @@ async def test_single_client_check_offers_on_demand_technical_details(runtime):
             for item in session.sent
             if isinstance(item, SendMessage) and item.text == "Дополнительные данные"
         )
-        assert offer.reply_markup.inline_keyboard[0][0].text == "📈 Показатели и причины"
+        assert offer.reply_markup.inline_keyboard[0][0].text == "📈 Кампании"
         assert offer.reply_markup.inline_keyboard[1][0].text == "👥 Аудитория"
         assert offer.reply_markup.inline_keyboard[2][0].text == "⚙️ Технические данные"
         data = offer.reply_markup.inline_keyboard[2][0].callback_data

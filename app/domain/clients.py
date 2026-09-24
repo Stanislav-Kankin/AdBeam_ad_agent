@@ -45,6 +45,8 @@ class MetricaConfig(StrictModel):
 
 
 class Targets(StrictModel):
+    # Main project KPI. None means CPA when primary goals are configured, else spend.
+    kpi: Literal["cpa", "drr", "conversions"] | None = None
     target_cpa: PositiveMoney | None = None
     target_drr: PositiveMoney | None = None
     monthly_budget: PositiveMoney | None = None

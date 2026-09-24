@@ -1,16 +1,19 @@
 """Owner-bound inline navigation over clients authorized for the current chat."""
 
 import secrets
+from decimal import Decimal, InvalidOperation
 from time import monotonic
 
 from aiogram import F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.analytics.rules import main_kpi
 from app.bot.callbacks import answer_callback
 from app.bot.report_message import retry_telegram
 from app.domain.reports import CheckMode
 from app.reporting.data_status import describe_data
+from app.reporting.formatter import fmt_short
 
 PAGE_SIZE = 8
 GOAL_PAGE_SIZE = 7
@@ -23,9 +26,62 @@ PERIODS = (
 )
 
 
+KPI_NAMES = {"cpa": "CPA", "drr": "ДРР", "conversions": "Конверсии"}
+TOLERANCES = (3, 5, 10)
+TARGET_FIELDS = {"target_cpa": "целевой CPA, ₽", "target_drr": "целевой ДРР, %"}
+
+
+def parse_target(value):
+    """Positive number from '2 500', '2500,5' or '0'/'-' to clear the target."""
+    cleaned = value.strip().replace(" ", "").replace(" ", "").replace(",", ".")
+    if cleaned in ("0", "-", "нет"):
+        return None
+    number = Decimal(cleaned)
+    if not number.is_finite() or number <= 0:
+        raise InvalidOperation
+    return number
+
+
 def install_menu(router, runtime, launch, launch_chart):
     actions = {}
     awaiting_user = {}
+    awaiting_target = {}
+
+    async def save_targets(client, targets, user):
+        updated = await runtime.checks.repository.save_client_preferences(
+            client, targets=targets, user_id=user
+        )
+        runtime.registry.clients[client.id] = updated
+        return updated
+
+    @router.message(
+        lambda message: (
+            message.text is not None and (message.chat.id, message.from_user.id) in awaiting_target
+        )
+    )
+    async def target_input(message):
+        key = (message.chat.id, message.from_user.id)
+        started, client_id, field = awaiting_target.pop(key)
+        if message.from_user.id not in runtime.settings.telegram_admin_user_ids:
+            return
+        if message.text.strip() in ("/cancel", "/menu", "/start"):
+            await show(message, message.from_user.id)
+            return
+        if monotonic() - started > 600:
+            await message.answer("Время ввода истекло. Откройте «KPI проекта» заново.")
+            return
+        try:
+            value = parse_target(message.text)
+            client = runtime.registry.require(message.chat.id, client_id)
+        except (InvalidOperation, ValueError):
+            awaiting_target[key] = (started, client_id, field)
+            await message.answer("Нужно положительное число, например 2500. 0 — убрать цель.")
+            return
+        except PermissionError:
+            await message.answer("Клиент больше недоступен этому чату.")
+            return
+        await save_targets(client, {field: value}, message.from_user.id)
+        await show(message, message.from_user.id, screen="kpi", client_id=client_id)
 
     @router.message(
         lambda message: (
@@ -179,6 +235,8 @@ def install_menu(router, runtime, launch, launch_chart):
                     and user in runtime.settings.telegram_admin_user_ids
                 ):
                     row("⚙️ Данные и цели", "data", client_id=client_id, page=page)
+                if client_id and user in runtime.settings.telegram_admin_user_ids:
+                    row("🎯 KPI проекта", "kpi", client_id=client_id, page=page)
             else:
                 text += "\nВыберите период завершённых дней (МСК)."
                 for label, period in PERIODS:
@@ -328,6 +386,63 @@ def install_menu(router, runtime, launch, launch_chart):
             if navigation:
                 rows.append(navigation)
             row("← Настройка данных", "data", client_id=client_id)
+        elif screen == "kpi":
+            if user not in runtime.settings.telegram_admin_user_ids:
+                raise PermissionError
+            client = runtime.registry.require(chat, client_id)
+            targets = client.targets
+            kpi = main_kpi(client)
+            tolerance = targets.kpi_change_tolerance_percent
+            text = badge + (
+                f"KPI проекта\n{client.name}\n\n"
+                f"Главный KPI: {KPI_NAMES.get(kpi, 'не определён')}"
+                f"{'' if targets.kpi else ' (автоматически)'}\n"
+                f"Целевой CPA: "
+                f"{fmt_short(targets.target_cpa, money=True) + ' ₽' if targets.target_cpa else 'не задан'}\n"
+                f"Целевой ДРР: "
+                f"{fmt_short(targets.target_drr) + '%' if targets.target_drr else 'не задан'}\n"
+                f"Допуск (статпогрешность): {fmt_short(tolerance)}%\n\n"
+                "Статус клиента считается по главному KPI. Если он в пределах допуска "
+                "или улучшился, изменения расхода, CPC и CR показываются как контекст, "
+                "а не как проблема."
+            )
+            if kpi is None:
+                text += (
+                    "\n\nБез основных целей CPA не рассчитывается: выберите цели в «Данные и цели»."
+                )
+            rows.append(
+                [
+                    button(
+                        ("✅ " if targets.kpi == value else "") + name,
+                        "set_kpi",
+                        client_id=client_id,
+                        value=value,
+                    )
+                    for value, name in KPI_NAMES.items()
+                ]
+                + [
+                    button(
+                        ("✅ " if targets.kpi is None else "") + "Авто",
+                        "set_kpi",
+                        client_id=client_id,
+                        value=None,
+                    )
+                ]
+            )
+            rows.append(
+                [
+                    button(
+                        ("✅ " if tolerance == value else "") + f"±{value}%",
+                        "set_tolerance",
+                        client_id=client_id,
+                        value=value,
+                    )
+                    for value in TOLERANCES
+                ]
+            )
+            for field, label in TARGET_FIELDS.items():
+                row(f"✏️ Задать {label}", "enter_target", client_id=client_id, field=field)
+            row("← К отчёту", "report", client_id=client_id, page=page)
         elif screen == "schedule":
             if user not in runtime.settings.telegram_admin_user_ids:
                 raise PermissionError
@@ -403,6 +518,10 @@ def install_menu(router, runtime, launch, launch_chart):
                     "counter_unavailable",
                     "goals",
                     "toggle_goal",
+                    "kpi",
+                    "set_kpi",
+                    "set_tolerance",
+                    "enter_target",
                 )
                 and user not in runtime.settings.telegram_admin_user_ids
             ):
@@ -519,6 +638,17 @@ def install_menu(router, runtime, launch, launch_chart):
                 edit=True,
                 client_id=client.id,
                 page=kwargs.get("page", 0),
+            )
+        elif action in ("set_kpi", "set_tolerance"):
+            client = runtime.registry.require(chat, kwargs["client_id"])
+            field = "kpi" if action == "set_kpi" else "kpi_change_tolerance_percent"
+            await save_targets(client, {field: kwargs["value"]}, user)
+            await show(callback.message, user, screen="kpi", edit=True, client_id=client.id)
+        elif action == "enter_target":
+            awaiting_target[(chat, user)] = (monotonic(), kwargs["client_id"], kwargs["field"])
+            await callback.message.answer(
+                f"Пришлите {TARGET_FIELDS[kwargs['field']]} числом, например 2500. "
+                "0 — убрать цель, /cancel — отмена."
             )
         elif action == "run":
             ids = [client_id] if client_id else [c.id for c in runtime.registry.visible(chat)]

@@ -9,7 +9,14 @@ from time import monotonic
 from app.analytics.metrics import aggregate, calculate, change, compare
 from app.analytics.periods import DateRange, today_moscow
 from app.analytics.progress import stage
-from app.analytics.rules import evaluate, tracking_health
+from app.analytics.rules import (
+    CONTEXT_SIGNALS,
+    VOLUME_SIGNALS,
+    evaluate,
+    kpi_stable,
+    main_kpi,
+    tracking_health,
+)
 from app.analytics.warehouse import combine_daily
 from app.domain.reports import (
     BreakdownRow,
@@ -23,7 +30,7 @@ from app.domain.reports import (
     Totals,
     TriggerSource,
 )
-from app.reporting.formatter import brief, compact
+from app.reporting.formatter import card, compact
 from app.storage.repository import safe_json
 
 logger = logging.getLogger(__name__)
@@ -35,7 +42,7 @@ def snapshot_metrics(snapshot, *, healthy=True):
     totals = snapshot.direct.totals.model_copy(deep=True)
     if snapshot.direct.status != DataStatus.OK:
         totals = Totals()
-    if not healthy or snapshot.metrica.status != DataStatus.OK or snapshot.metrica.missing_goal_ids:
+    if not healthy:
         totals.conversions = None
     revenue = snapshot.revenue
     totals.revenue = revenue.amount if revenue.status == DataStatus.OK else None
@@ -70,19 +77,11 @@ def drivers(current, previous):
 def report_level(client, signals, current, previous, reliable):
     if any(signal.level == "red" for signal in signals):
         return "red"
-    cpa_delta = change(current.cpa, previous.cpa)["percent"]
-    stable_cpa = bool(
-        client.targets.target_cpa
-        and current.cpa is not None
-        and previous.cpa is not None
-        and cpa_delta is not None
-        and abs(Decimal(cpa_delta)) <= Decimal(str(client.targets.kpi_change_tolerance_percent))
-        and current.cpa
-        <= client.targets.target_cpa * (1 + Decimal(str(client.targets.cpa_excess_percent)) / 100)
+    # The account status follows the project KPI. When it is stable or improving,
+    # traffic volume and funnel shifts stay in the report as context, not as alerts.
+    contextual = CONTEXT_SIGNALS | (
+        VOLUME_SIGNALS if kpi_stable(client, current, previous) else frozenset()
     )
-    contextual = {"campaign_states"}
-    if stable_cpa:
-        contextual.update(("spend_change", "cpc_change"))
     if any(signal.type not in contextual for signal in signals):
         return "yellow"
     return "green" if reliable else "unknown"
@@ -518,9 +517,9 @@ class CheckService:
                         or "выручка отсутствует, равна нулю или несопоставима."
                     )
                 )
-            if previous.direct.status != DataStatus.OK or previous.metrica.status != DataStatus.OK:
+            if previous.direct.status != DataStatus.OK:
                 limitations.append(
-                    "Предыдущий период неполный или недоступен; сравнение ограничено."
+                    "Предыдущий период Директа неполный или недоступен; сравнение ограничено."
                 )
             if (a.clicks or 0) < client.targets.minimum_clicks:
                 limitations.append("Недостаточный объём кликов для выводов об эффективности.")
@@ -672,14 +671,18 @@ class CheckService:
                     f"Показаны первые 50 сигналов из {len(signals)}; сузьте период для деталей."
                 )
                 signals = signals[:50]
+            # Site-level Metrica data is context; it does not decide Direct KPI reliability.
             reliable = (
                 health["healthy"]
                 and previous.direct.status == DataStatus.OK
-                and previous.metrica.status == DataStatus.OK
                 and (a.clicks or 0) >= client.targets.minimum_clicks
                 and current.direct.campaigns_status == DataStatus.OK
                 and mature
-                and all(v in ("ok", "not_checked") for v in checks.values())
+                and all(
+                    v in ("ok", "not_checked")
+                    for k, v in checks.items()
+                    if k not in ("основные цели", "доступность")
+                )
             )
             # When CPA is the configured KPI and remains stable, traffic-volume changes and
             # currently stopped legacy campaigns stay useful context but do not color the account.
@@ -709,6 +712,8 @@ class CheckService:
                 limitations=list(dict.fromkeys(limitations)),
                 main_goal_ids=client.metrica.main_goal_ids,
                 targets={
+                    "kpi": main_kpi(client),
+                    "kpi_stable": kpi_stable(client, a, b),
                     "target_cpa": client.targets.target_cpa,
                     "target_drr": client.targets.target_drr,
                     "kpi_change_tolerance_percent": client.targets.kpi_change_tolerance_percent,
@@ -783,7 +788,7 @@ class CheckService:
                     if any(v == "unavailable" for v in result.source_status.values()):
                         errors.append(f"{client.name}: один или несколько источников недоступны.")
             text = (
-                brief(reports[0])
+                card(reports[0])
                 if len(clients) == 1 and reports and mode != CheckMode.SUMMARY
                 else compact(reports, period, errors, mode == CheckMode.SUMMARY)
             )

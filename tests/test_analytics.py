@@ -8,8 +8,19 @@ from app.analytics.diagnostics import report_level, snapshot_metrics
 from app.analytics.metrics import aggregate, calculate, change, expected_budget
 from app.analytics.periods import MOSCOW, AnalysisPeriod, DateRange, make_period
 from app.analytics.rules import evaluate, tracking_health
+from app.analytics.warehouse import combine_daily
 from app.domain.clients import Targets
-from app.domain.reports import CheckMode, DataStatus, Totals, TriggerSource
+from app.domain.reports import (
+    BreakdownRow,
+    CheckMode,
+    DataStatus,
+    DirectData,
+    MetricaData,
+    RevenueData,
+    Snapshot,
+    Totals,
+    TriggerSource,
+)
 
 
 def test_periods_and_moscow():
@@ -104,6 +115,68 @@ async def test_stable_target_cpa_keeps_contextual_changes_green(runtime):
     assert report_level(client, report.signals, report.current, report.previous, True) == "yellow"
 
 
+async def test_stable_cpa_without_target_is_green(runtime):
+    # Team feedback: CPA is the project KPI; within the 3% noise the account is fine.
+    base = runtime.registry.clients["grand_line"]
+    client = base.model_copy(
+        update={"targets": base.targets.model_copy(update={"target_cpa": None})}
+    )
+    report = await runtime.checks.analyze(client, make_period(), CheckMode.STANDARD)
+    volume = [s for s in report.signals if s.type in ("spend_change", "cpc_change", "cr_drop")]
+    stable = report.current.model_copy(update={"cpa": Decimal("2394.12")})
+    before = report.previous.model_copy(update={"cpa": Decimal("2363.89")})
+    assert report_level(client, volume, stable, before, reliable=True) == "green"
+    worse = stable.model_copy(update={"cpa": Decimal("2600")})
+    assert report_level(client, volume, worse, before, reliable=True) == "yellow"
+
+
+async def test_cpa_growth_without_target_is_signalled(runtime):
+    base = runtime.registry.clients["grand_line"]
+    client = base.model_copy(
+        update={
+            "targets": base.targets.model_copy(
+                update={"target_cpa": None, "conversion_delay_days": 0}
+            )
+        }
+    )
+    period = make_period()
+    snapshot, _ = await runtime.checks.snapshots(client, period)
+    current = calculate(
+        Totals(spend=Decimal(50000), impressions=20000, clicks=1000, conversions=Decimal(20))
+    )
+    previous = calculate(
+        Totals(spend=Decimal(40000), impressions=20000, clicks=1000, conversions=Decimal(20))
+    )
+    signals = evaluate(
+        client, current, previous, period, {"healthy": True, "reasons": []}, snapshot
+    )
+    assert any(s.type == "cpa_change" for s in signals)
+
+
+async def test_kpi_profile_keeps_goals_and_warehouse(runtime, client):
+    repo = runtime.checks.repository
+    day = make_period().current.end
+    snapshot, _ = await runtime.checks.snapshots(client, make_period("yesterday"))
+    await repo.save_daily_snapshot(client.id, DateRange(start=day, end=day), snapshot)
+
+    updated = await repo.save_client_preferences(
+        client, targets={"kpi": "cpa", "target_cpa": Decimal("2500")}, user_id=1
+    )
+    assert updated.targets.kpi == "cpa"
+    assert updated.targets.target_cpa == Decimal("2500")
+    assert updated.direct.main_goal_ids == client.direct.main_goal_ids
+    assert await repo.has_fresh_daily_snapshot(client.id, day)
+
+    updated = await repo.save_client_preferences(
+        updated, targets={"kpi_change_tolerance_percent": 5}, user_id=1
+    )
+    restored = await repo.configure_client(client)
+    assert restored.targets.target_cpa == Decimal("2500")
+    assert restored.targets.kpi_change_tolerance_percent == 5
+    with pytest.raises(ValidationError):
+        await repo.save_client_preferences(client, targets={"target_cpa": -1}, user_id=1)
+
+
 async def test_mock_overlapping_periods_consistent(runtime, client):
     p = make_period()
     left = DateRange(start=p.current.start, end=p.current.start)
@@ -117,7 +190,7 @@ async def test_mock_overlapping_periods_consistent(runtime, client):
 async def test_tracking_failure_suppresses_conversion_claims(runtime, client):
     p = make_period()
     a, b = await runtime.checks.snapshots(client, p)
-    a.metrica.status = DataStatus.UNAVAILABLE
+    a.direct.totals.conversions = None
     health = tracking_health(client, a, b, p)
     metrics = snapshot_metrics(a, healthy=health["healthy"])
     assert metrics.cpa is None and metrics.cr is None
@@ -130,7 +203,7 @@ async def test_tracking_failure_suppresses_conversion_claims(runtime, client):
 async def test_tracking_failure_hides_campaign_conversion_metrics(runtime, client, monkeypatch):
     period = make_period()
     current, previous = await runtime.checks.snapshots(client, period)
-    current.metrica.status = DataStatus.UNAVAILABLE
+    current.direct.totals.conversions = None
 
     async def snapshots(*args, **kwargs):
         return current, previous
@@ -144,6 +217,56 @@ async def test_tracking_failure_hides_campaign_conversion_metrics(runtime, clien
         for key in ("current", "previous")
         for metric in ("conversions", "cr", "cpa")
     )
+
+
+async def test_metrica_failure_keeps_direct_cpa(runtime, client):
+    p = make_period()
+    a, b = await runtime.checks.snapshots(client, p)
+    a.metrica.status = DataStatus.UNAVAILABLE
+    a.metrica.sampled = True
+    health = tracking_health(client, a, b, p)
+    assert health["healthy"]
+    assert health["warnings"]
+    metrics = snapshot_metrics(a, healthy=health["healthy"])
+    assert metrics.cpa is not None and metrics.conversions is not None
+
+
+def test_daily_warehouse_keeps_totals_when_one_day_is_empty():
+    start = date(2026, 9, 1)
+
+    def day(offset, empty=False):
+        d = DateRange(start=start + timedelta(days=offset), end=start + timedelta(days=offset))
+        rows = (
+            []
+            if empty
+            else [
+                BreakdownRow(
+                    id="1",
+                    name="C",
+                    totals=Totals(
+                        spend=Decimal(1000), impressions=500, clicks=50, conversions=Decimal(2)
+                    ),
+                )
+            ]
+        )
+        return Snapshot(
+            direct=DirectData(
+                status=DataStatus.EMPTY if empty else DataStatus.OK,
+                period=d,
+                rows=rows,
+                totals=aggregate([r.totals for r in rows]),
+                campaigns_status=DataStatus.OK,
+            ),
+            metrica=MetricaData(status=DataStatus.OK, period=d, visits=0 if empty else 100),
+            revenue=RevenueData(status=DataStatus.NOT_CHECKED, period=d, source="none"),
+        )
+
+    period = DateRange(start=start, end=start + timedelta(days=6))
+    combined = combine_daily([day(i, empty=i == 3) for i in range(7)], period)
+    assert combined.direct.status == DataStatus.OK
+    assert combined.direct.totals.spend == 6000
+    assert combined.direct.totals.conversions == 12
+    assert combined.metrica.status == DataStatus.OK
 
 
 async def test_zero_conversions_everywhere_is_tracking_signal(runtime, client):

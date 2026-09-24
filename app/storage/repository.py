@@ -3,8 +3,10 @@ import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
+from pydantic import ValidationError
 from sqlalchemy import delete, func, select, update
 
+from app.domain.clients import Targets
 from app.security import redact
 from app.storage.models import (
     BotUser,
@@ -519,6 +521,13 @@ class Repository:
             return client
         goals = [str(value) for value in row.primary_goal_ids][:10]
         counters = [int(value) for value in row.selected_counter_ids]
+        # Validated merge: a stored profile that no longer fits the schema is ignored.
+        targets = client.targets
+        if row.targets:
+            try:
+                targets = Targets.model_validate({**client.targets.model_dump(), **row.targets})
+            except ValidationError:
+                targets = client.targets
         return client.model_copy(
             update={
                 "direct": client.direct.model_copy(update={"main_goal_ids": goals}),
@@ -529,19 +538,31 @@ class Repository:
                         "main_goal_ids": goals,
                     }
                 ),
+                "targets": targets,
             }
         )
 
     async def save_client_preferences(
-        self, client, *, counter_ids=None, goal_ids=None, goal_roles=None, user_id=None
+        self,
+        client,
+        *,
+        counter_ids=None,
+        goal_ids=None,
+        goal_roles=None,
+        targets=None,
+        user_id=None,
     ):
         async with self.write_session() as session:
             row = await session.get(ClientPreference, (self.app_mode, client.id))
             if row is None:
+                # A new row replaces YAML goals and counters, so start from the current ones.
                 row = ClientPreference(
                     app_mode=self.app_mode,
                     client_id=client.id,
                     client_login=client.direct.client_login,
+                    selected_counter_ids=client.metrica.selected_counter_ids(),
+                    primary_goal_ids=list(client.metrica.main_goal_ids),
+                    goal_roles={},
                 )
                 session.add(row)
             if counter_ids is not None:
@@ -550,9 +571,14 @@ class Repository:
                 row.primary_goal_ids = list(dict.fromkeys(str(v) for v in goal_ids))[:10]
             if goal_roles is not None:
                 row.goal_roles = goal_roles
+            if targets is not None:
+                Targets.model_validate({**client.targets.model_dump(), **targets})
+                row.targets = safe_json({**(row.targets or {}), **targets})
             row.updated_by = str(user_id) if user_id is not None else None
             row.updated_at = datetime.now(UTC)
-        await self.invalidate_snapshots(client.id)
+        # Snapshots store raw source data: only goal/counter changes make them stale.
+        if counter_ids is not None or goal_ids is not None:
+            await self.invalidate_snapshots(client.id)
         return await self.configure_client(client)
 
     async def invalidate_snapshots(self, client_id):
