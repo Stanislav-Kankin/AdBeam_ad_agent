@@ -322,7 +322,8 @@ class DirectAdapter:
                 # summing them would count micro-conversions as leads.
                 valued = sorted(items, key=lambda item: -(item.get("Value") or 0))
                 primary = strategy[0] if strategy else str(valued[0]["GoalId"]) if valued else None
-                if not primary:
+                # Display (CPM) campaigns pay for impressions and have no goals by design.
+                if not primary and row.get("Type") != "CPM_BANNER_CAMPAIGN":
                     bidding = settings.get("BiddingStrategy") or {}
                     logger.info(
                         "Campaign without goals client=%s id=%s type=%s settings=%s "

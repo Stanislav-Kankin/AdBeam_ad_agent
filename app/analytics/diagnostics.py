@@ -574,6 +574,13 @@ class CheckService:
                 }
             )
         without = [row for row in campaigns if row["primary_goal"] is None]
+        unlisted = [row["id"] for row in without if row["id"] not in settings]
+        if unlisted:
+            # Spend in Reports but absent from Campaigns.get: their settings (and goals)
+            # cannot be read at all, which is what Master campaigns seem to do.
+            logger.info(
+                "Campaigns missing from Campaigns.get client=%s ids=%s", client.id, unlisted[:20]
+            )
         if without:
             limitations.append(
                 f"У {len(without)} кампаний Директ не отдал цель в настройках; они всё равно "
