@@ -14,6 +14,8 @@ from app.security import redact
 
 REPORTS_URL = "https://api.direct.yandex.com/json/v5/reports"
 CAMPAIGNS_URL = "https://api.direct.yandex.com/json/v5/campaigns"
+BID_MODIFIERS_URL = "https://api.direct.yandex.com/json/v5/bidmodifiers"
+SEGMENT_FIELDS = {"gender": "Gender", "age": "Age", "income": "IncomeGrade"}
 DIMENSIONS = {
     "date": ("ACCOUNT_PERFORMANCE_REPORT", ["Date"]),
     "campaign": ("CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId", "CampaignName"]),
@@ -49,10 +51,13 @@ def strategy_goals(value):
     return found
 
 
-def parse_goal_tsv(text: str, goals: list[str], attribution: str):
-    """Campaign rows with conversions kept per goal instead of summed."""
-    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")), delimiter="	")
+def parse_goal_tsv(text: str, goals: list[str], attribution: str, segment: str | None = None):
+    """Campaign rows with conversions kept per goal instead of summed; with a
+    segment field (Gender, Age, IncomeGrade) the key is "<campaign>|<value>"."""
+    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")), delimiter="\t")
     required = {"CampaignId", "CampaignName", "Cost", "Impressions", "Clicks"}
+    if segment:
+        required.add(segment)
     columns = {goal: f"Conversions_{goal}_{attribution}" for goal in goals}
     if not reader.fieldnames or not required.issubset(reader.fieldnames):
         raise IntegrationError("direct", "invalid_tsv_columns")
@@ -60,7 +65,11 @@ def parse_goal_tsv(text: str, goals: list[str], attribution: str):
         raise IntegrationError("direct", "missing_goal_columns")
     rows = {}
     for raw in reader:
-        rows[str(raw["CampaignId"])] = {
+        campaign_id = str(raw["CampaignId"])
+        value = str(raw.get(segment) or "UNKNOWN") if segment else None
+        rows[f"{campaign_id}|{value}" if segment else campaign_id] = {
+            "campaign_id": campaign_id,
+            "segment": value,
             "name": redact(str(raw.get("CampaignName") or ""))[:200],
             "spend": number(raw.get("Cost")),
             "impressions": int(number(raw.get("Impressions"))),
@@ -315,8 +324,10 @@ class DirectAdapter:
             offset = int(result["LimitedBy"])
         raise IntegrationError("direct", "campaign_limit")
 
-    async def goal_report(self, client, period, goal_ids):
-        """Campaign spend and conversions per goal; goals are requested in batches of ten."""
+    async def goal_report(self, client, period, goal_ids, segment=None):
+        """Campaign spend and conversions per goal; goals are requested in batches of ten.
+        segment (gender, age, income) splits every campaign row by that audience field."""
+        field = SEGMENT_FIELDS.get(segment) if segment else None
         merged = {}
         for index in range(0, len(goal_ids), REPORT_GOALS_LIMIT):
             batch = goal_ids[index : index + REPORT_GOALS_LIMIT]
@@ -325,12 +336,13 @@ class DirectAdapter:
                 "FieldNames": [
                     "CampaignId",
                     "CampaignName",
+                    *([field] if field else []),
                     "Impressions",
                     "Clicks",
                     "Cost",
                     "Conversions",
                 ],
-                "ReportType": "CAMPAIGN_PERFORMANCE_REPORT",
+                "ReportType": "CUSTOM_REPORT" if field else "CAMPAIGN_PERFORMANCE_REPORT",
                 "DateRangeType": "CUSTOM_DATE",
                 "Format": "TSV",
                 "IncludeVAT": "NO",
@@ -351,12 +363,62 @@ class DirectAdapter:
                     headers=self.headers(client),
                     json={"params": params},
                 )
-            for campaign_id, row in parse_goal_tsv(
-                response.text, batch, client.direct.attribution_model
+            for key, row in parse_goal_tsv(
+                response.text, batch, client.direct.attribution_model, field
             ).items():
-                target = merged.setdefault(campaign_id, {**row, "goals": {}})
+                target = merged.setdefault(key, {**row, "goals": {}})
                 target["goals"].update(row["goals"])
         return merged
+
+    async def demographic_adjustments(self, client, campaign_ids):
+        """Gender/age bid adjustments per campaign: what the targeting was set to."""
+        found = []
+        for index in range(0, len(campaign_ids), 10):
+            offset = 0
+            for _ in range(20):
+                data = await self.transport.json(
+                    "direct",
+                    "POST",
+                    BID_MODIFIERS_URL,
+                    headers=self.headers(client),
+                    json={
+                        "method": "get",
+                        "params": {
+                            "SelectionCriteria": {
+                                "CampaignIds": [int(v) for v in campaign_ids[index : index + 10]],
+                                "Types": ["DEMOGRAPHICS_ADJUSTMENT"],
+                                "Levels": ["CAMPAIGN", "AD_GROUP"],
+                            },
+                            "FieldNames": ["CampaignId", "AdGroupId", "Level"],
+                            "DemographicsAdjustmentFieldNames": [
+                                "Gender",
+                                "Age",
+                                "BidModifier",
+                                "Enabled",
+                            ],
+                            "Page": {"Limit": 1000, "Offset": offset},
+                        },
+                    },
+                )
+                result = data.get("result", {})
+                for row in result.get("BidModifiers") or []:
+                    item = row.get("DemographicsAdjustment") or {}
+                    if item.get("Enabled") == "NO":
+                        continue
+                    found.append(
+                        {
+                            "campaign_id": str(row.get("CampaignId")),
+                            "level": str(row.get("Level") or ""),
+                            "gender": item.get("Gender"),
+                            "age": item.get("Age"),
+                            # 100 = no change, 0 = the segment is excluded (-100%).
+                            "bid_percent": item.get("BidModifier"),
+                        }
+                    )
+                if "LimitedBy" not in result:
+                    break
+                offset = int(result["LimitedBy"])
+        return found
 
     async def overview(self, client, period):
         report, campaigns = await asyncio.gather(

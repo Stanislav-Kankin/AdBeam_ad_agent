@@ -326,10 +326,14 @@ class CheckService:
             await self.repository.save_analysis(client.id, period.current, "audience", result)
         return result
 
-    async def campaign_goal_performance(self, client, start, end, *, top_n=20):
+    async def campaign_goal_performance(
+        self, client, start, end, *, top_n=20, segment=None, campaign_ids=None
+    ):
         """Campaigns judged by the goals configured inside them (key goals and the
         strategy goal). Works without selected main goals and without Metrica, and
-        covers up to a year by summing additive Direct totals over <=90-day chunks."""
+        covers up to a year by summing additive Direct totals over <=90-day chunks.
+        segment (gender/age/income) adds who converted on those goals, next to the
+        demographic bid adjustments the campaigns were set up with."""
         base = {"period": {"start": str(start), "end": str(end)}, "source": "Direct Reports"}
         try:
             settings = await self.provider.campaign_goals(client)
@@ -351,43 +355,63 @@ class CheckService:
             chunk_end = min(end, cursor + timedelta(days=89))
             chunks.append(DateRange(start=cursor, end=chunk_end))
             cursor = chunk_end + timedelta(days=1)
-        kind = "cg" + hashlib.sha256(json.dumps(goal_ids).encode("utf-8")).hexdigest()[:8]
-        totals, limitations = {}, []
-        for chunk in chunks:
-            rows = await self.repository.cached_analysis(client.id, chunk, kind)
-            if rows is None:
-                try:
-                    rows = safe_json(await self.provider.goal_report(client, chunk, goal_ids))
-                except Exception as exc:
-                    logger.warning(
-                        "Goal report failed client=%s period=%s..%s error=%s",
-                        client.id,
-                        chunk.start,
-                        chunk.end,
-                        exc,
+
+        async def load(split):
+            """Rows summed over all chunks, keyed like goal_report; None on failure."""
+            kind = (
+                "cg" + hashlib.sha256(json.dumps([goal_ids, split]).encode("utf-8")).hexdigest()[:8]
+            )
+            summed = {}
+            for chunk in chunks:
+                rows = await self.repository.cached_analysis(client.id, chunk, kind)
+                if rows is None:
+                    try:
+                        rows = safe_json(
+                            await self.provider.goal_report(client, chunk, goal_ids, split)
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Goal report failed client=%s segment=%s period=%s..%s error=%s",
+                            client.id,
+                            split,
+                            chunk.start,
+                            chunk.end,
+                            exc,
+                        )
+                        limitations.append(f"direct: {exc} ({chunk.label()})")
+                        return None
+                    await self.repository.save_analysis(client.id, chunk, kind, rows, ttl_hours=6)
+                for key, row in rows.items():
+                    target = summed.setdefault(
+                        key,
+                        {
+                            "campaign_id": row.get("campaign_id", key),
+                            "segment": row.get("segment"),
+                            "name": row["name"],
+                            "spend": Decimal(0),
+                            "clicks": 0,
+                            "impressions": 0,
+                            "goals": {},
+                        },
                     )
-                    return {
-                        **base,
-                        "status": "unavailable",
-                        "limitations": [f"direct: {exc} ({chunk.label()})"],
-                    }
-                await self.repository.save_analysis(client.id, chunk, kind, rows, ttl_hours=6)
-            for campaign_id, row in rows.items():
-                target = totals.setdefault(
-                    campaign_id,
-                    {
-                        "name": row["name"],
-                        "spend": Decimal(0),
-                        "clicks": 0,
-                        "impressions": 0,
-                        "goals": {},
-                    },
-                )
-                target["spend"] += amount(row["spend"])
-                target["clicks"] += int(row["clicks"] or 0)
-                target["impressions"] += int(row["impressions"] or 0)
-                for goal, value in row["goals"].items():
-                    target["goals"][goal] = target["goals"].get(goal, Decimal(0)) + amount(value)
+                    target["spend"] += amount(row["spend"])
+                    target["clicks"] += int(row["clicks"] or 0)
+                    target["impressions"] += int(row["impressions"] or 0)
+                    for goal, value in row["goals"].items():
+                        target["goals"][goal] = target["goals"].get(goal, Decimal(0)) + amount(
+                            value
+                        )
+            return summed
+
+        limitations = []
+        totals = await load(None)
+        if totals is None:
+            return {**base, "status": "unavailable", "limitations": limitations}
+        if campaign_ids:
+            wanted = set(campaign_ids)
+            totals = {
+                key: row for key, row in totals.items() if key in wanted or row["name"] in wanted
+            }
         names = {
             str(goal["id"]): goal["name"]
             for counter in await self.repository.client_counters(client.id)
@@ -474,10 +498,16 @@ class CheckService:
         limitations.append(
             "Разные кампании могут вести на разные цели: сравнивай CPA внутри одной цели (by_goal)."
         )
+        audience = None
+        if segment:
+            audience = await self.goal_segments(
+                client, load, segment, campaigns[:top_n], settings, limitations, ratio
+            )
         return safe_json(
             {
                 **base,
                 "status": "ok",
+                "audience": audience,
                 "attribution": client.direct.attribution_model,
                 "goals_found": len(goal_ids),
                 "by_goal": by_goal,
@@ -489,6 +519,84 @@ class CheckService:
                 "limitations": limitations,
             }
         )
+
+    async def goal_segments(self, client, load, segment, campaigns, settings, limitations, ratio):
+        """Who converted on each campaign's own goals, split by gender/age/income,
+        plus the demographic bid adjustments set in those campaigns."""
+        rows = await load(segment)
+        if rows is None:
+            return {"dimension": segment, "status": "unavailable"}
+        selected = {row["id"] for row in campaigns if row["conversions"] is not None}
+
+        def summary(items):
+            clicks = sum(item["clicks"] for item in items) or 0
+            conversions = sum((item["conversions"] for item in items), Decimal(0))
+            grouped = {}
+            for item in items:
+                target = grouped.setdefault(
+                    item["segment"],
+                    {
+                        "segment": item["segment"],
+                        "clicks": 0,
+                        "spend": Decimal(0),
+                        "conversions": Decimal(0),
+                    },
+                )
+                target["clicks"] += item["clicks"]
+                target["spend"] += item["spend"]
+                target["conversions"] += item["conversions"]
+            result = []
+            for value in grouped.values():
+                value["clicks_share_percent"] = ratio(value["clicks"], clicks, 100)
+                value["conversions_share_percent"] = ratio(value["conversions"], conversions, 100)
+                value["cpa"] = ratio(value["spend"], value["conversions"])
+                result.append(value)
+            return sorted(result, key=lambda v: v["conversions"], reverse=True)
+
+        items = []
+        for row in rows.values():
+            if row["campaign_id"] not in selected:
+                continue
+            own = settings.get(row["campaign_id"], {}).get("goal_ids", [])
+            items.append(
+                {
+                    "campaign_id": row["campaign_id"],
+                    "segment": row["segment"],
+                    "clicks": row["clicks"],
+                    "spend": row["spend"],
+                    "conversions": sum(
+                        (row["goals"].get(goal, Decimal(0)) for goal in own), Decimal(0)
+                    ),
+                }
+            )
+        by_campaign = [
+            {
+                "id": campaign["id"],
+                "name": campaign["name"],
+                "rows": summary([i for i in items if i["campaign_id"] == campaign["id"]]),
+            }
+            for campaign in campaigns
+            if campaign["id"] in selected
+        ][:5]
+        adjustments = None
+        if segment in ("gender", "age") and selected:
+            try:
+                adjustments = await self.provider.demographic_adjustments(client, sorted(selected))
+            except Exception as exc:
+                logger.warning("Bid adjustments failed client=%s error=%s", client.id, exc)
+                limitations.append("Корректировки ставок по полу и возрасту не загрузились.")
+        limitations.append(
+            "Пол и возраст в Директе — оценка Яндекса по профилю пользователя, а не анкета; "
+            "UNKNOWN — пользователи, для которых оценки нет."
+        )
+        return {
+            "dimension": segment,
+            "status": "ok",
+            "total": summary(items),
+            "by_campaign": by_campaign,
+            # bid_percent: 100 = no change, 0 = segment excluded (-100%).
+            "targeting_adjustments": adjustments,
+        }
 
     async def metrica_report(
         self, client, period, report_type, *, goal_ids=None, campaign_ids=None, top_n=20

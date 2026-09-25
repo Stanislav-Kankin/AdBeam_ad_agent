@@ -96,3 +96,20 @@ async def test_tool_rejects_period_over_a_year(runtime):
         request_id="r",
     )
     assert result["status"] == "invalid"
+
+
+async def test_gender_of_converters_is_shown_next_to_targeting(runtime, client):
+    # Marina case: men were excluded by a bid adjustment, yet men leave the leads.
+    client.direct.main_goal_ids, client.metrica.main_goal_ids = [], []
+    result = await ToolRegistry(runtime.checks).call(
+        "get_campaign_goal_performance",
+        '{"client_id":"west_export","days":30,"segment":"gender","campaign_ids":["101"]}',
+        chat_id=123456789,
+        request_id="r",
+    )
+    audience = result["audience"]
+    assert [c["id"] for c in result["campaigns"]] == ["101"]
+    men = next(r for r in audience["total"] if r["segment"] == "GENDER_MALE")
+    assert Decimal(men["conversions_share_percent"]) == Decimal("98.00")
+    assert Decimal(men["clicks_share_percent"]) < 25
+    assert audience["targeting_adjustments"][0]["bid_percent"] == 0

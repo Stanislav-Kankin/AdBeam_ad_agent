@@ -148,21 +148,45 @@ class MockProvider:
             },
         }
 
-    async def goal_report(self, client, period, goal_ids):
+    async def goal_report(self, client, period, goal_ids, segment=None):
+        # Gender split: women bring most clicks, men leave almost all conversions.
+        if segment == "gender":
+            splits = [
+                ("GENDER_FEMALE", Decimal("0.8"), Decimal("0.02")),
+                ("GENDER_MALE", Decimal("0.2"), Decimal("0.98")),
+            ]
+        else:
+            splits = [("UNKNOWN" if segment else None, Decimal(1), Decimal(1))]
         rows = {}
         for row in (await self.breakdown(client, period, "campaign")).rows:
             own = "5001" if row.id == "101" else "5002"
-            rows[row.id] = {
-                "name": row.name,
-                "spend": row.totals.spend,
-                "impressions": row.totals.impressions,
-                "clicks": row.totals.clicks,
-                "goals": {
-                    goal: Decimal(row.totals.conversions or 0) if goal == own else Decimal(0)
-                    for goal in goal_ids
-                },
-            }
+            for value, traffic, share in splits:
+                rows[f"{row.id}|{value}" if segment else row.id] = {
+                    "campaign_id": row.id,
+                    "segment": value,
+                    "name": row.name,
+                    "spend": Decimal(row.totals.spend) * traffic,
+                    "impressions": int((row.totals.impressions or 0) * traffic),
+                    "clicks": int((row.totals.clicks or 0) * traffic),
+                    "goals": {
+                        goal: Decimal(row.totals.conversions or 0) * share
+                        if goal == own
+                        else Decimal(0)
+                        for goal in goal_ids
+                    },
+                }
         return rows
+
+    async def demographic_adjustments(self, client, campaign_ids):
+        return [
+            {
+                "campaign_id": "101",
+                "level": "CAMPAIGN",
+                "gender": "GENDER_MALE",
+                "age": None,
+                "bid_percent": 0,
+            }
+        ]
 
     async def audience_interests(self, client, period):
         return {

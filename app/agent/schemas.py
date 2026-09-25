@@ -131,6 +131,18 @@ class CampaignGoalArgs(StrictModel):
     start_date: date | None = None
     end_date: date | None = None
     top_n: int = Field(default=20, ge=1, le=50)
+    segment: Literal["gender", "age", "income"] | None = Field(
+        default=None,
+        description=(
+            "Разрез конверсий по целям кампаний: gender (пол), age (возраст) или income "
+            "(доход). Для gender/age также возвращает корректировки таргетинга кампаний."
+        ),
+    )
+    campaign_ids: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="ID или точные названия кампаний; пустой список — все кампании.",
+    )
 
     @field_validator("client_id")
     @classmethod

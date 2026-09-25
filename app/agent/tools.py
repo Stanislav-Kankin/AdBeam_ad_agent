@@ -92,7 +92,12 @@ class ToolRegistry:
                     "client_id": client.id,
                     "mock": self.checks.provider.mock,
                     **await self.checks.campaign_goal_performance(
-                        client, first_day, last_day, top_n=args.top_n
+                        client,
+                        first_day,
+                        last_day,
+                        top_n=args.top_n,
+                        segment=args.segment,
+                        campaign_ids=args.campaign_ids,
                     ),
                 }
             period = args.analysis_period()
