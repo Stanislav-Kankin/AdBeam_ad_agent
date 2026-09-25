@@ -1,3 +1,4 @@
+import re
 from datetime import date, timedelta
 from typing import Literal
 
@@ -166,3 +167,175 @@ class CampaignGoalArgs(StrictModel):
         if end > yesterday or start > end or (end - start).days + 1 > 366:
             raise ValueError("Период: завершённые дни, не больше 366.")
         return start, end
+
+
+METRICA_NAME = re.compile(r"^ym:(s|pv):[A-Za-z0-9<>]{2,80}$")
+# Identifiers of people and free-form visit parameters never leave Metrica.
+SENSITIVE = re.compile(
+    r"(?i)(clientid|userid|visitid|watchid|ipaddress|cookie|yandexuid|counteruser|params|email|phone)"
+)
+
+
+class RangeArgs(StrictModel):
+    """A completed period of up to a year; compare adds the equal period before it."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    client_id: str = Field(
+        min_length=1,
+        max_length=200,
+        description="ID, точное имя, логин или алиас клиента из list_clients.",
+    )
+    days: int = Field(default=30, ge=1, le=366, description="Последние N завершённых дней.")
+    start_date: date | None = None
+    end_date: date | None = None
+    compare: bool = Field(
+        default=False,
+        description="Добавить такой же период перед выбранным и изменения по каждой строке.",
+    )
+
+    @field_validator("client_id")
+    @classmethod
+    def clean_client(cls, value):
+        return ClientArgs.clean_client(value)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        self.date_range()
+        return self
+
+    date_range = CampaignGoalArgs.date_range
+
+
+class CatalogArgs(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    client_id: str = Field(min_length=1, max_length=200)
+
+    @field_validator("client_id")
+    @classmethod
+    def clean_client(cls, value):
+        return ClientArgs.clean_client(value)
+
+
+class MetricaQueryArgs(RangeArgs):
+    counter_id: int | None = Field(
+        default=None, gt=0, description="ID счётчика из get_metrica_catalog; пусто — основной."
+    )
+    metrics: list[str] = Field(
+        min_length=1,
+        max_length=20,
+        description=(
+            "Метрики Reporting API, например ym:s:visits, ym:s:users, ym:s:bounceRate, "
+            "ym:s:goal<ID>reaches, ym:s:goal<ID>conversionRate, ym:s:ecommerceRevenue."
+        ),
+    )
+    dimensions: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description=(
+            "Группировки, например ym:s:gender, ym:s:ageInterval, ym:s:deviceCategory, "
+            "ym:s:lastTrafficSource, ym:s:<attribution>DirectClickOrder (кампания Директа), "
+            "ym:s:startURL, ym:s:regionCity, ym:s:date."
+        ),
+    )
+    filters: str | None = Field(
+        default=None,
+        max_length=600,
+        description=(
+            "Фильтр Metrica, например ym:s:<attribution>DirectClickOrder=.('712117313') "
+            "или ym:s:lastTrafficSource=='ad'."
+        ),
+    )
+    sort: str | None = Field(default=None, max_length=100, description="Например -ym:s:visits.")
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("metrics", "dimensions")
+    @classmethod
+    def metrica_names(cls, values):
+        values = list(dict.fromkeys(value.strip() for value in values))
+        for value in values:
+            if not METRICA_NAME.fullmatch(value) or SENSITIVE.search(value):
+                raise ValueError(f"Недопустимое поле Метрики: {value[:80]}")
+        return values
+
+    @field_validator("filters", "sort")
+    @classmethod
+    def plain_text(cls, value):
+        if value is not None and (any(ch in value for ch in "\r\n\t") or SENSITIVE.search(value)):
+            raise ValueError("Недопустимый фильтр или сортировка.")
+        return value
+
+
+class DirectFilter(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    field: str = Field(pattern=r"^[A-Za-z]{2,40}$")
+    operator: Literal[
+        "EQUALS",
+        "NOT_EQUALS",
+        "IN",
+        "NOT_IN",
+        "LESS_THAN",
+        "GREATER_THAN",
+        "STARTS_WITH_IGNORE_CASE",
+        "DOES_NOT_START_WITH_IGNORE_CASE",
+        "STARTS_WITH_ANY_IGNORE_CASE",
+        "DOES_NOT_START_WITH_ALL_IGNORE_CASE",
+    ]
+    values: list[str] = Field(min_length=1, max_length=50)
+
+    def api(self):
+        return {"Field": self.field, "Operator": self.operator, "Values": self.values}
+
+
+class DirectOrder(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    field: str = Field(pattern=r"^[A-Za-z]{2,40}$")
+    descending: bool = True
+
+    def api(self):
+        return {"Field": self.field, "SortOrder": "DESCENDING" if self.descending else "ASCENDING"}
+
+
+class DirectQueryArgs(RangeArgs):
+    report_type: Literal[
+        "ACCOUNT_PERFORMANCE_REPORT",
+        "CAMPAIGN_PERFORMANCE_REPORT",
+        "ADGROUP_PERFORMANCE_REPORT",
+        "AD_PERFORMANCE_REPORT",
+        "CRITERIA_PERFORMANCE_REPORT",
+        "SEARCH_QUERY_PERFORMANCE_REPORT",
+        "REACH_AND_FREQUENCY_PERFORMANCE_REPORT",
+        "CUSTOM_REPORT",
+    ] = "CUSTOM_REPORT"
+    fields: list[str] = Field(
+        min_length=1,
+        max_length=25,
+        description=(
+            "Поля Reports API: срезы (CampaignName, CampaignId, AdGroupName, Criterion, Query, "
+            "Placement, Device, Gender, Age, IncomeGrade, LocationOfPresenceName, Date, "
+            "AdNetworkType, Slot) и показатели (Impressions, Clicks, Cost, Ctr, AvgCpc, "
+            "Conversions, CostPerConversion, ConversionRate, Revenue, BounceRate)."
+        ),
+    )
+    filters: list[DirectFilter] = Field(default_factory=list, max_length=10)
+    goal_ids: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Цели для Conversions/CostPerConversion (по каждой цели отдельная колонка).",
+    )
+    order_by: list[DirectOrder] = Field(default_factory=list, max_length=3)
+    limit: int = Field(default=50, ge=1, le=200)
+
+    @field_validator("fields")
+    @classmethod
+    def direct_fields(cls, values):
+        values = list(dict.fromkeys(value.strip() for value in values))
+        if any(not re.fullmatch(r"[A-Za-z]{2,40}", value) for value in values):
+            raise ValueError("Недопустимое поле Директа.")
+        return values
+
+    @field_validator("goal_ids")
+    @classmethod
+    def numeric_goals(cls, values):
+        if any(not value.isdigit() for value in values):
+            raise ValueError("Goal IDs must be numeric.")
+        return values

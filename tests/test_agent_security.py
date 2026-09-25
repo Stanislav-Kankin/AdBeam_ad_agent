@@ -36,8 +36,16 @@ async def test_every_tool_denies_unknown_chat_before_fetch(runtime, monkeypatch)
 async def test_client_permission_each_tool_and_no_cross_chat_leak(runtime):
     runtime.registry.clients["west_export"].telegram.allowed_chat_ids = [888]
     registry = ToolRegistry(runtime.checks)
+    required = {
+        "query_metrica": ',"metrics":["ym:s:visits"]',
+        "query_direct": ',"fields":["CampaignName","Cost"]',
+    }
     for name in DESCRIPTIONS:
-        args = "{}" if name == "list_clients" else '{"client_id":"west_export"}'
+        args = (
+            "{}"
+            if name == "list_clients"
+            else '{"client_id":"west_export"' + required.get(name, "") + "}"
+        )
         result = await registry.call(name, args, chat_id=123456789, request_id="r")
         if name == "list_clients":
             assert "west_export" not in json.dumps(result)

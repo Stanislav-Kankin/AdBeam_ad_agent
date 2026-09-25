@@ -36,9 +36,31 @@ def _safe_api_error(response):
     return None
 
 
+def _safe_api_message(response):
+    """Human-readable reason of a rejected query (HTTP 400) for the universal report
+    tools, so the model can correct metric or field names. It only echoes the query
+    we sent; it is redacted, bounded and never logged."""
+    from app.security import redact
+
+    try:
+        data = response.json()
+    except (ValueError, TypeError):
+        return None
+    message = None
+    if isinstance(data, dict):
+        errors = data.get("errors")
+        if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+            message = errors[0].get("message")
+        error = data.get("error")
+        if isinstance(error, dict):
+            message = error.get("error_detail") or error.get("error_string") or message
+        message = message or data.get("message")
+    return redact(str(message))[:300] if message else None
+
+
 class IntegrationError(Exception):
-    def __init__(self, source: str, code: str):
-        self.source, self.code = source, code
+    def __init__(self, source: str, code: str, detail: str | None = None):
+        self.source, self.code, self.detail = source, code, detail
         explanation = {
             "quota_cooldown_429": "квота запросов Метрики исчерпана (HTTP 429); запросы временно приостановлены, данные не получены",
             "http_403": "доступ запрещён (HTTP 403)",
@@ -158,7 +180,11 @@ class ReadTransport:
                         upstream or "unknown",
                     )
                     suffix = f"_{upstream}" if upstream else ""
-                    raise IntegrationError(source, f"http_{response.status_code}{suffix}")
+                    raise IntegrationError(
+                        source,
+                        f"http_{response.status_code}{suffix}",
+                        _safe_api_message(response) if response.status_code == 400 else None,
+                    )
                 waiting = offline and response.status_code in (201, 202)
                 if attempt >= self.retries and not waiting:
                     raise IntegrationError(source, f"retry_exhausted_http_{response.status_code}")
@@ -200,7 +226,7 @@ class ReadTransport:
                 source,
                 code if isinstance(code, int) else "unknown",
             )
-            raise IntegrationError(source, "api_error" + suffix)
+            raise IntegrationError(source, "api_error" + suffix, _safe_api_message(response))
         if cache_key:
             if len(self.cache) >= 512:
                 self.cache.pop(next(iter(self.cache)))

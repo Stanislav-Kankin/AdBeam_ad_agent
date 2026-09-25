@@ -148,6 +148,104 @@ class MetricaAdapter:
             "limitations": limitations,
         }
 
+    async def query(
+        self, client, counter_id, start, end, *, metrics, dimensions, filters, sort, limit
+    ):
+        """Arbitrary read-only Reporting API query built by the agent (validated upstream)."""
+        params = {
+            "ids": int(counter_id),
+            "date1": str(start),
+            "date2": str(end),
+            "metrics": ",".join(metrics),
+            "accuracy": "full",
+            "lang": "ru",
+            "limit": limit,
+            "attribution": ATTRIBUTIONS[client.direct.attribution_model],
+        }
+        if dimensions:
+            params["dimensions"] = ",".join(dimensions)
+        if filters:
+            params["filters"] = filters
+        if sort:
+            params["sort"] = sort
+        data = await self.transport.json(
+            "metrica",
+            "GET",
+            BASE_URL + "/stat/v1/data",
+            headers=self.headers(client),
+            params=params,
+        )
+        names = data.get("query", {}).get("metrics") or metrics
+        rows = []
+        for item in data.get("data", []):
+            rows.append(
+                {
+                    "dimensions": [
+                        {
+                            "id": str(value.get("id") or "")[:100],
+                            "name": redact(str(value.get("name") or value.get("id") or "—"))[:200],
+                        }
+                        for value in item.get("dimensions", [])
+                        if isinstance(value, dict)
+                    ],
+                    "metrics": dict(zip(names, item.get("metrics", []), strict=False)),
+                }
+            )
+        return {
+            "rows": rows,
+            "totals": dict(zip(names, data.get("totals", []), strict=False)),
+            "total_rows": data.get("total_rows", len(rows)),
+            "sampled": bool(data.get("sampled")),
+            "sample_share": data.get("sample_share"),
+            "contains_sensitive_data": bool(data.get("contains_sensitive_data")),
+        }
+
+    async def catalog(self, client, counter_ids):
+        """Counters with access status, and goals (id, name, type) of accessible ones."""
+        result = []
+        for counter_id in list(dict.fromkeys(int(v) for v in counter_ids))[:10]:
+            try:
+                info = await self.transport.json(
+                    "metrica",
+                    "GET",
+                    f"{BASE_URL}/management/v1/counter/{counter_id}",
+                    headers=self.headers(client),
+                )
+                goals = await self.transport.json(
+                    "metrica",
+                    "GET",
+                    f"{BASE_URL}/management/v1/counter/{counter_id}/goals",
+                    headers=self.headers(client),
+                )
+            except IntegrationError as exc:
+                result.append(
+                    {
+                        "id": counter_id,
+                        "access": "no_access" if "403" in exc.code else "unavailable",
+                        "goals": [],
+                    }
+                )
+                continue
+            counter = info.get("counter") or {}
+            result.append(
+                {
+                    "id": counter_id,
+                    "access": "ok",
+                    "name": redact(str(counter.get("name") or ""))[:200],
+                    "site": redact(str(counter.get("site") or ""))[:200],
+                    "goals": [
+                        {
+                            "id": str(goal["id"]),
+                            "name": redact(str(goal.get("name") or goal["id"]))[:150],
+                            "type": str(goal.get("type") or "")[:40],
+                        }
+                        for goal in goals.get("goals") or []
+                        if isinstance(goal, dict) and "id" in goal
+                    ][:60],
+                }
+            )
+        return result
+
     async def goal_names(self, client, counter_ids):
         """Goal names of the given counters; counters without access are skipped."""
         names = {}

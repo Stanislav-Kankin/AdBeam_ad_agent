@@ -203,6 +203,59 @@ class MockProvider:
             }
         ]
 
+    async def client_counters(self, client):
+        return [client.metrica.counter_id or 1]
+
+    async def metrica_catalog(self, client, counter_ids):
+        return [
+            {
+                "id": counter_id,
+                "access": "ok",
+                "name": "Сайт клиента",
+                "site": "example.ru",
+                "goals": [
+                    {"id": k, "name": v, "type": "action"} for k, v in self.GOAL_NAMES.items()
+                ],
+            }
+            for counter_id in counter_ids
+        ]
+
+    async def metrica_query(self, client, counter_id, start, end, **query):
+        # Gender split of visits and form leads: women visit, men leave the leads.
+        scale = Decimal((end - start).days + 1)
+        values = {"GENDER_FEMALE": (80, 2), "GENDER_MALE": (20, 98)}
+        rows = [
+            {
+                "dimensions": [{"id": key, "name": "женский" if "FEMALE" in key else "мужской"}],
+                "metrics": dict(zip(query["metrics"], [v * scale, g * scale], strict=False)),
+            }
+            for key, (v, g) in values.items()
+        ]
+        return {
+            "rows": rows[: query["limit"]],
+            "totals": {},
+            "total_rows": len(rows),
+            "sampled": False,
+            "sample_share": 1,
+            "contains_sensitive_data": False,
+        }
+
+    async def direct_query(self, client, start, end, **query):
+        rows = []
+        from app.analytics.periods import DateRange
+
+        window = DateRange(start=max(start, end - timedelta(days=89)), end=end)
+        for row in (await self.breakdown(client, window, "campaign")).rows:
+            full = {
+                "CampaignId": row.id,
+                "CampaignName": row.name,
+                "Impressions": str(row.totals.impressions),
+                "Clicks": str(row.totals.clicks),
+                "Cost": str(row.totals.spend),
+            }
+            rows.append({k: full.get(k, "--") for k in query["fields"]})
+        return {"columns": query["fields"], "rows": rows[: query["limit"]]}
+
     async def audience_interests(self, client, period):
         return {
             "status": "ok",

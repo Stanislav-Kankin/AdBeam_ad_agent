@@ -5,6 +5,7 @@ from typing import Protocol
 from app.analytics.progress import stage
 from app.domain.reports import DataStatus, DirectData, MetricaData, RevenueData, Snapshot
 from app.integrations.direct import DirectAdapter
+from app.integrations.discovery import campaign_counters
 from app.integrations.http import IntegrationError
 from app.integrations.metrica import MetricaAdapter
 from app.integrations.roistat import RoistatAdapter
@@ -24,6 +25,10 @@ class AnalyticsProvider(Protocol):
     async def goal_report(self, client, period, goal_ids, segment=None): ...
     async def demographic_adjustments(self, client, campaign_ids): ...
     async def goal_names(self, client, counter_ids): ...
+    async def client_counters(self, client) -> list[int]: ...
+    async def metrica_catalog(self, client, counter_ids): ...
+    async def metrica_query(self, client, counter_id, start, end, **query): ...
+    async def direct_query(self, client, start, end, **query): ...
 
 
 def error_code(exc):
@@ -68,6 +73,26 @@ class ProductionProvider:
 
     async def demographic_adjustments(self, client, campaign_ids):
         return await self.direct.demographic_adjustments(client, campaign_ids)
+
+    async def client_counters(self, client):
+        """Counters a client may be queried on: selected ones and those in its campaigns.
+        This is the access boundary of the universal Metrica report."""
+        selected = client.metrica.selected_counter_ids()
+        try:
+            linked = await campaign_counters(self.direct.transport, client)
+        except Exception as exc:
+            logger.warning("Campaign counters failed client=%s error=%s", client.id, exc)
+            linked = []
+        return list(dict.fromkeys([*selected, *(int(v) for v in linked)]))
+
+    async def metrica_catalog(self, client, counter_ids):
+        return await self.metrica.catalog(client, counter_ids)
+
+    async def metrica_query(self, client, counter_id, start, end, **query):
+        return await self.metrica.query(client, counter_id, start, end, **query)
+
+    async def direct_query(self, client, start, end, **query):
+        return await self.direct.query(client, start, end, **query)
 
     async def goal_names(self, client, counter_ids):
         try:

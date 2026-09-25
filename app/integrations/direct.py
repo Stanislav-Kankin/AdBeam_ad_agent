@@ -419,6 +419,51 @@ class DirectAdapter:
                 target["goals"].update(row["goals"])
         return merged
 
+    async def query(
+        self, client, start, end, *, report_type, fields, filters, goals, order_by, limit
+    ):
+        """Arbitrary read-only Reports API query built by the agent (validated upstream).
+        Returns raw columns; with goals, Conversions etc. come per goal."""
+        params = {
+            "SelectionCriteria": {"DateFrom": str(start), "DateTo": str(end)},
+            "FieldNames": fields,
+            "ReportType": report_type,
+            "DateRangeType": "CUSTOM_DATE",
+            "Format": "TSV",
+            "IncludeVAT": "NO",
+            "IncludeDiscount": "NO",
+            "Page": {"Limit": limit},
+        }
+        if filters:
+            params["SelectionCriteria"]["Filter"] = filters
+        if goals:
+            params["Goals"] = goals
+            params["AttributionModels"] = [client.direct.attribution_model]
+        if order_by:
+            params["OrderBy"] = order_by
+        params["ReportName"] = (
+            "adbeam_q_"
+            + hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:24]
+        )
+        async with self.report_lock(client):
+            response = await self.transport.request(
+                "direct",
+                "POST",
+                REPORTS_URL,
+                pending=True,
+                headers=self.headers(client),
+                json={"params": params},
+            )
+        reader = csv.DictReader(io.StringIO(response.text.lstrip("﻿")), delimiter="\t")
+        rows = [
+            {
+                key: redact(value)[:300] if isinstance(value, str) else value
+                for key, value in raw.items()
+            }
+            for raw in reader
+        ]
+        return {"columns": list(reader.fieldnames or []), "rows": rows}
+
     async def demographic_adjustments(self, client, campaign_ids):
         """Gender/age bid adjustments per campaign: what the targeting was set to."""
         found = []
