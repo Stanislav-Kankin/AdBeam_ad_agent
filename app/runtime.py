@@ -6,6 +6,7 @@ from app.agent.service import AgentService
 from app.analytics.diagnostics import CheckService
 from app.bot.jobs import BackgroundJobs
 from app.config import load_clients
+from app.integrations.claude import ClaudeProvider
 from app.integrations.deepseek import DeepSeekProvider
 from app.integrations.direct import DirectAdapter
 from app.integrations.discovery import AccountDiscovery
@@ -38,7 +39,7 @@ class Runtime:
         if self.schedule:
             await self.schedule.close()
         await self.jobs.close()
-        if isinstance(self.agent.llm, DeepSeekProvider):
+        if hasattr(self.agent.llm, "close"):
             await self.agent.llm.close()
         await self.http.aclose()
         await self.engine.dispose()
@@ -59,11 +60,12 @@ def build_runtime(settings):
     )
     repo = Repository(sessions, settings.app_mode)
     checks = CheckService(registry, provider, repo)
-    llm = (
-        DeepSeekProvider(settings)
-        if settings.deepseek_api_key.get_secret_value()
-        else (OfflineDemoProvider() if settings.app_mode == "mock" else None)
-    )
+    if settings.llm_provider == "anthropic" and settings.anthropic_api_key.get_secret_value():
+        llm = ClaudeProvider(settings)
+    elif settings.deepseek_api_key.get_secret_value():
+        llm = DeepSeekProvider(settings)
+    else:
+        llm = OfflineDemoProvider() if settings.app_mode == "mock" else None
     runtime = Runtime(
         settings,
         registry,
@@ -71,7 +73,9 @@ def build_runtime(settings):
         AgentService(
             checks,
             llm,
-            settings.deepseek_daily_limit if isinstance(llm, DeepSeekProvider) else None,
+            settings.deepseek_daily_limit
+            if isinstance(llm, DeepSeekProvider | ClaudeProvider)
+            else None,
         ),
         BackgroundJobs(settings.max_background_jobs),
         engine,

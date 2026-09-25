@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     deepseek_api_key: SecretStr = SecretStr("")
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
+    # Which model answers questions. DeepSeek stays the fallback: switching back is
+    # one line in .env.
+    llm_provider: Literal["deepseek", "anthropic"] = "deepseek"
+    anthropic_api_key: SecretStr = SecretStr("")
+    anthropic_model: str = "claude-sonnet-5"
     http_timeout_seconds: float = Field(default=30, gt=0, le=120)
     http_retries: int = Field(default=4, ge=0, le=8)
     max_background_jobs: int = Field(default=4, ge=1, le=16)

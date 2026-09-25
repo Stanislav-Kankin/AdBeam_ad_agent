@@ -35,6 +35,8 @@ class LLMProvider(Protocol):
 
 
 class DeepSeekProvider:
+    name = "DeepSeek"
+
     def __init__(self, settings):
         self.client = AsyncOpenAI(
             api_key=settings.deepseek_api_key.get_secret_value(),

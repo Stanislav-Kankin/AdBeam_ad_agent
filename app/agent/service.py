@@ -32,7 +32,8 @@ class AgentService:
             return await self.deterministic_fallback(
                 text,
                 chat_id,
-                "DeepSeek не подключён. Для свободного анализа настройте DEEPSEEK_API_KEY в .env.",
+                "Модель не подключена. Для свободного анализа задайте DEEPSEEK_API_KEY "
+                "или ANTHROPIC_API_KEY с LLM_PROVIDER=anthropic в .env.",
                 user_id=user_id,
             )
         request_id, start = str(uuid4()), monotonic()
@@ -72,7 +73,7 @@ class AgentService:
                     ):
                         return self.fallback(
                             evidence,
-                            "Достигнут суточный лимит обращений к DeepSeek для этого чата. Обычные отчёты /check и /summary доступны.",
+                            "Достигнут суточный лимит обращений к модели для этого чата. Обычные отчёты /check и /summary доступны.",
                         )
                     logger.info("Agent model started request=%s", request_id)
                     async with asyncio.timeout(45):
@@ -154,7 +155,8 @@ class AgentService:
             message = (
                 "Сбор данных не завершился в отведённое время. Повторная проверка автоматически не запускается."
                 if phase == "tool"
-                else "DeepSeek недоступен или не ответил вовремя. Показываю доступный результат без комментария модели."
+                else "Модель недоступна или не ответила вовремя. "
+                "Показываю доступный результат без комментария модели."
             )
             if any(result.get("reports") for result in evidence):
                 return self.fallback(evidence, message)

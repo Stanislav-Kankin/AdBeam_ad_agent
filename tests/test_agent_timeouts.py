@@ -14,7 +14,7 @@ async def test_tool_timeout_never_starts_second_check(runtime):
     runtime.checks.run_check = AsyncMock()
     answer = await service.ask("Обзор West за вчера", 123456789, 1)
     runtime.checks.run_check.assert_not_called()
-    assert "DeepSeek недоступен" not in answer
+    assert "Модель недоступна" not in answer
     assert "Повторная проверка автоматически не запускается" in answer
 
 
