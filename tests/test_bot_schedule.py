@@ -529,3 +529,35 @@ async def test_background_work_does_not_block_other_messages(runtime):
     await asyncio.wait_for(ran.wait(), 1)
     release.set()
     await jobs.close()
+
+
+async def test_group_menu_is_shared_and_survives_a_newer_menu(runtime):
+    # A menu opened in a group can be pressed by another member, and opening a
+    # second menu does not kill the first one.
+    from aiogram.types import CallbackQuery
+
+    private = message_update("/menu")
+    group = private.model_copy(
+        update={
+            "message": private.message.model_copy(
+                update={"chat": Chat(id=123456789, type="supergroup")}
+            )
+        }
+    )
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+        await dp.feed_update(bot, group)
+        first = session.sent[-1].reply_markup.inline_keyboard
+        await dp.feed_update(bot, group)
+        token = next(b.callback_data for row in first for b in row if "Клиенты" in b.text)
+        callback = CallbackQuery(
+            id="shared",
+            from_user=User(id=3, is_bot=False, first_name="Colleague"),
+            chat_instance="test",
+            message=group.message,
+            data=token,
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=callback))
+        assert "Страница" in session.sent[-1].text or "Клиент" in session.sent[-1].text
+        assert not getattr(session.sent[-1], "show_alert", False)

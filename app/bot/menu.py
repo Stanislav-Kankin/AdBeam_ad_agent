@@ -42,6 +42,9 @@ def parse_target(value):
     return number
 
 
+MENU_TTL = 6 * 3600
+
+
 def install_menu(router, runtime, launch, launch_chart):
     actions = {}
     awaiting_user = {}
@@ -117,19 +120,28 @@ def install_menu(router, runtime, launch, launch_chart):
         await show(message, message.from_user.id, screen="users")
 
     def clear(chat, user):
+        """/cancel: drop every menu this user opened in the chat."""
         for key, value in list(actions.items()):
-            if value[1:3] == (chat, user) or monotonic() - value[0] > 600:
+            if value[1:3] == (chat, user) or monotonic() - value[0] > MENU_TTL:
+                actions.pop(key, None)
+
+    def prune(screen=None):
+        # A new screen must not kill other menus still open in a group; only the
+        # pressed screen (one-shot, so a launch button cannot run twice) and expired ones.
+        for key, value in list(actions.items()):
+            if value[5] == screen or monotonic() - value[0] > MENU_TTL:
                 actions.pop(key, None)
 
     async def show(message, user, screen="home", page=0, client_id=None, mode=None, edit=False):
         chat = message.chat.id
-        clear(chat, user)
+        prune()
         clients = runtime.registry.visible(chat)
         rows = []
+        screen_id = secrets.token_hex(4)
 
         def button(label, action, **kwargs):
             token = secrets.token_hex(8)
-            actions[token] = (monotonic(), chat, user, action, kwargs)
+            actions[token] = (monotonic(), chat, user, action, kwargs, screen_id)
             return InlineKeyboardButton(text=label, callback_data="menu:" + token)
 
         def row(label, action, **kwargs):
@@ -479,13 +491,15 @@ def install_menu(router, runtime, launch, launch_chart):
         item = actions.get(callback.data.removeprefix("menu:"))
         if (
             not item
-            or monotonic() - item[0] > 600
+            or monotonic() - item[0] > MENU_TTL
             or not callback.message
-            or item[1:3] != (callback.message.chat.id, callback.from_user.id)
+            or item[1] != callback.message.chat.id
+            # Private chats stay bound to the opener; a group menu is shared.
+            or (callback.message.chat.type == "private" and item[2] != callback.from_user.id)
         ):
             answered = await answer_callback(
                 callback,
-                "Меню устарело или принадлежит другому пользователю. Откройте /menu.",
+                "Кнопка из старого меню: бот перезапускался или меню истекло. Откройте /menu.",
                 show_alert=True,
             )
             if not answered and callback.message:
@@ -497,7 +511,9 @@ def install_menu(router, runtime, launch, launch_chart):
                     )
                 )
             return
-        _, chat, user, action, kwargs = item
+        _, chat, _opener, action, kwargs, screen_id = item
+        # In a group anyone may press a shared menu; rights are those of the presser.
+        user = callback.from_user.id
         try:
             client_id = kwargs.get("client_id")
             if client_id:
@@ -531,7 +547,7 @@ def install_menu(router, runtime, launch, launch_chart):
                 callback, "Доступ больше не разрешён. Откройте /menu.", show_alert=True
             )
             return
-        clear(chat, user)
+        prune(screen_id)
         await answer_callback(callback)
         if action == "member_add":
             awaiting_user[(chat, user)] = monotonic()
