@@ -511,11 +511,17 @@ def build_dispatcher(runtime):
                         and (mentioned or context_changed)
                     ):
                         try:
+                            period = AnalysisPeriod.model_validate(context["period"])
+                        except ValueError:
+                            # Context saved before the fix or a range without comparison:
+                            # there is nothing to chart, and that is not an error.
+                            logger.info("Question chart skipped: no comparison period")
+                            period = None
+                        try:
                             client = runtime.registry.require(
                                 message.chat.id, context["active_client_id"]
                             )
-                            period = AnalysisPeriod.model_validate(context["period"])
-                            if not await send_chart(message, client, period):
+                            if period and not await send_chart(message, client, period):
                                 await message.answer(
                                     "Текстовый анализ готов, но Директ не вернул дневные "
                                     "данные для графика за весь выбранный период."

@@ -323,7 +323,8 @@ def evaluate(
                 "Состояние кампаний получено из Direct API на момент проверки.",
                 "Уточнить, запланирована ли остановка рекламы.",
             )
-        if stopped:
+        # With nothing active, "some campaigns are stopped" only repeats the alert above.
+        if stopped and active:
             add(
                 "campaign_states",
                 "yellow",

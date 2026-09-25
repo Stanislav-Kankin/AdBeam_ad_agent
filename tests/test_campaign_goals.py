@@ -183,3 +183,29 @@ async def test_choosing_goals_by_hand_ends_automatic_mode(runtime, client):
     assert manual.direct.goals_source == "manual"
     runtime.checks.goals_checked.clear()
     assert await runtime.checks.ensure_goals(manual) is manual
+
+
+async def test_goal_tool_range_does_not_become_the_chart_period(runtime):
+    # A 120-day range without comparison was stored as the dialogue period and the
+    # chart after the answer crashed on AnalysisPeriod validation.
+    from app.agent.service import AgentService
+    from app.integrations.deepseek import LLMMessage, ToolCall
+
+    llm = AsyncMock()
+    llm.complete.side_effect = [
+        LLMMessage(
+            calls=[
+                ToolCall(
+                    "g",
+                    "get_campaign_goal_performance",
+                    '{"client_id":"west_export","days":120}',
+                )
+            ]
+        ),
+        LLMMessage(content="Лучшая кампания — «РСЯ — каталог»."),
+    ]
+    await AgentService(runtime.checks, llm).ask("Лучшая кампания за 4 месяца", 123456789, 1)
+    context = await runtime.checks.repository.conversation(123456789, 1)
+    assert context["active_client_id"] == "west_export"
+    period = context.get("period")
+    assert period is None or {"current", "previous"} <= period.keys()

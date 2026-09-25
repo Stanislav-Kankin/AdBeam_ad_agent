@@ -119,8 +119,11 @@ class AgentService:
                         evidence.append(result)
                         if result.get("client_id"):
                             active_id = result["client_id"]
-                        if result.get("period"):
-                            active_period = result["period"]
+                        # Only a comparison period becomes the dialogue context: the
+                        # campaign-goal tool returns a single range of up to a year.
+                        period = result.get("period")
+                        if isinstance(period, dict) and {"current", "previous"} <= period.keys():
+                            active_period = period
                         messages.append(
                             {
                                 "role": "tool",
