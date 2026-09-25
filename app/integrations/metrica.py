@@ -148,6 +148,24 @@ class MetricaAdapter:
             "limitations": limitations,
         }
 
+    async def goal_names(self, client, counter_ids):
+        """Goal names of the given counters; counters without access are skipped."""
+        names = {}
+        for counter_id in list(dict.fromkeys(counter_ids))[:5]:
+            try:
+                data = await self.transport.json(
+                    "metrica",
+                    "GET",
+                    f"{BASE_URL}/management/v1/counter/{int(counter_id)}/goals",
+                    headers=self.headers(client),
+                )
+            except IntegrationError:
+                continue
+            for value in data.get("goals") or []:
+                if isinstance(value, dict) and "id" in value:
+                    names[str(value["id"])] = redact(str(value.get("name") or value["id"]))[:150]
+        return names
+
     async def direct_report(
         self, client, period, report_type, *, goal_ids=None, campaign_ids=None, limit=20
     ):

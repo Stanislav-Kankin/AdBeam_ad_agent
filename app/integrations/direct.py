@@ -290,7 +290,12 @@ class DirectAdapter:
                         "SelectionCriteria": {},
                         "FieldNames": ["Id", "Name", "State", "Type"],
                         **{
-                            f"{kind}FieldNames": ["PriorityGoals", "BiddingStrategy"]
+                            f"{kind}FieldNames": [
+                                "PriorityGoals",
+                                "BiddingStrategy",
+                                # Smart campaigns name it CounterId and are skipped here.
+                                *(["CounterIds"] if kind != "SmartCampaign" else []),
+                            ]
                             for kind in kinds
                         },
                         "Page": {"Limit": 1000, "Offset": offset},
@@ -305,19 +310,42 @@ class DirectAdapter:
                     (row[kind] for kind in kinds if isinstance(row.get(kind), dict)),
                     {},
                 )
-                priority = [
-                    str(item["GoalId"])
+                items = [
+                    item
                     for item in (settings.get("PriorityGoals") or {}).get("Items") or []
                     if item.get("GoalId") and int(item["GoalId"]) > 1000
                 ]
+                priority = [str(item["GoalId"]) for item in items]
                 strategy = strategy_goals(settings.get("BiddingStrategy"))
+                # The goal the campaign is judged by: the one its strategy optimises,
+                # otherwise the most valuable key goal. Other key goals are secondary;
+                # summing them would count micro-conversions as leads.
+                valued = sorted(items, key=lambda item: -(item.get("Value") or 0))
+                primary = strategy[0] if strategy else str(valued[0]["GoalId"]) if valued else None
+                if not primary:
+                    bidding = settings.get("BiddingStrategy") or {}
+                    logger.info(
+                        "Campaign without goals client=%s id=%s type=%s settings=%s "
+                        "search=%s network=%s",
+                        client.id,
+                        row.get("Id"),
+                        row.get("Type"),
+                        sorted(settings),
+                        (bidding.get("Search") or {}).get("BiddingStrategyType"),
+                        (bidding.get("Network") or {}).get("BiddingStrategyType"),
+                    )
                 campaigns[str(row["Id"])] = {
                     "name": redact(str(row.get("Name") or ""))[:200],
                     "state": str(row.get("State") or ""),
                     "type": str(row.get("Type") or ""),
+                    "primary_goal_id": primary,
                     "priority_goal_ids": priority,
                     "strategy_goal_ids": strategy,
                     "goal_ids": list(dict.fromkeys(priority + strategy)),
+                    "counter_ids": [
+                        str(value)
+                        for value in (settings.get("CounterIds") or {}).get("Items") or []
+                    ],
                 }
             if "LimitedBy" not in result:
                 return campaigns

@@ -58,6 +58,7 @@ async def test_direct_reads_goals_set_in_campaigns(client, monkeypatch):
         goals = await DirectAdapter(ReadTransport(http)).campaign_goals(client)
     assert goals["101"]["goal_ids"] == ["5001", "5002"]
     assert goals["101"]["priority_goal_ids"] == ["5001"]
+    assert goals["101"]["primary_goal_id"] == "5002"  # the strategy goal wins
 
 
 async def test_tool_ranks_campaigns_by_their_own_goals_over_four_months(runtime, client):
@@ -74,10 +75,24 @@ async def test_tool_ranks_campaigns_by_their_own_goals_over_four_months(runtime,
     )
     assert result["status"] == "ok"
     assert spy.await_count == 2  # 120 days = two Direct reports of up to 90 days
-    assert {goal["goal_id"] for goal in result["by_goal"]} == {"5001", "5002"}
-    for goal in result["by_goal"]:
-        assert goal["best"]["id"] == ("101" if goal["goal_id"] == "5001" else "102")
     assert any("из 2 отчётов" in text for text in result["limitations"])
+
+    # A campaign counts only its primary goal: the frequent micro goal is not a lead.
+    search = next(c for c in result["campaigns"] if c["id"] == "101")
+    assert search["primary_goal"]["name"] == "Отклик на вакансию"
+    micro = next(g for g in search["other_goals"] if g["id"] == "5004")
+    assert Decimal(search["conversions"]) * 50 == Decimal(micro["conversions"])
+    assert Decimal(search["cr"]) < 100
+
+    # The Master campaign exposes no goal, yet it is compared on the form goal it
+    # converts on, fetched from the counter, and is named rather than shown as an ID.
+    goals = {g["goal_id"]: g for g in result["by_goal"]}
+    assert result["by_goal"][0]["goal_id"] == "5001"
+    form = goals["5003"]
+    assert form["name"] == "Отправка формы"
+    assert form["most_conversions"]["id"] == "102"
+    assert form["most_conversions"]["goal_in_settings"] is False
+    assert any("не отдал цель" in text for text in result["limitations"])
 
     await registry.call(
         "get_campaign_goal_performance",

@@ -128,25 +128,40 @@ class MockProvider:
         report = await self.breakdown(client, period, dimension)
         return report.rows, True
 
+    # Rusagro-like account: the search campaign lists a lead goal plus a micro goal
+    # that fires often; the Master campaign exposes no goal but brings the form leads.
+    GOAL_NAMES = {"5001": "Отклик на вакансию", "5003": "Отправка формы", "5004": "Скролл 50%"}
+    GOAL_YIELD = {
+        "101": {"5001": Decimal("0.2"), "5004": Decimal(10)},
+        "102": {"5003": Decimal(1), "5004": Decimal(3)},
+    }
+
     async def campaign_goals(self, client):
         return {
             "101": {
                 "name": "Поиск — основные товары",
                 "state": "ON",
                 "type": "TEXT_CAMPAIGN",
-                "priority_goal_ids": ["5001"],
+                "primary_goal_id": "5001",
+                "priority_goal_ids": ["5001", "5004"],
                 "strategy_goal_ids": [],
-                "goal_ids": ["5001"],
+                "goal_ids": ["5001", "5004"],
+                "counter_ids": ["1"],
             },
             "102": {
                 "name": "РСЯ — каталог",
                 "state": "ON",
-                "type": "TEXT_CAMPAIGN",
+                "type": "UNIFIED_CAMPAIGN",
+                "primary_goal_id": None,
                 "priority_goal_ids": [],
-                "strategy_goal_ids": ["5002"],
-                "goal_ids": ["5002"],
+                "strategy_goal_ids": [],
+                "goal_ids": [],
+                "counter_ids": ["1"],
             },
         }
+
+    async def goal_names(self, client, counter_ids):
+        return dict(self.GOAL_NAMES)
 
     async def goal_report(self, client, period, goal_ids, segment=None):
         # Gender split: women bring most clicks, men leave almost all conversions.
@@ -159,7 +174,7 @@ class MockProvider:
             splits = [("UNKNOWN" if segment else None, Decimal(1), Decimal(1))]
         rows = {}
         for row in (await self.breakdown(client, period, "campaign")).rows:
-            own = "5001" if row.id == "101" else "5002"
+            yields = self.GOAL_YIELD.get(row.id, {})
             for value, traffic, share in splits:
                 rows[f"{row.id}|{value}" if segment else row.id] = {
                     "campaign_id": row.id,
@@ -169,9 +184,9 @@ class MockProvider:
                     "impressions": int((row.totals.impressions or 0) * traffic),
                     "clicks": int((row.totals.clicks or 0) * traffic),
                     "goals": {
-                        goal: Decimal(row.totals.conversions or 0) * share
-                        if goal == own
-                        else Decimal(0)
+                        goal: Decimal(row.totals.conversions or 0)
+                        * yields.get(goal, Decimal(0))
+                        * share
                         for goal in goal_ids
                     },
                 }

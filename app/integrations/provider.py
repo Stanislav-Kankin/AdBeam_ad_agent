@@ -23,6 +23,7 @@ class AnalyticsProvider(Protocol):
     async def campaign_goals(self, client): ...
     async def goal_report(self, client, period, goal_ids, segment=None): ...
     async def demographic_adjustments(self, client, campaign_ids): ...
+    async def goal_names(self, client, counter_ids): ...
 
 
 def error_code(exc):
@@ -67,6 +68,13 @@ class ProductionProvider:
 
     async def demographic_adjustments(self, client, campaign_ids):
         return await self.direct.demographic_adjustments(client, campaign_ids)
+
+    async def goal_names(self, client, counter_ids):
+        try:
+            return await self.metrica.goal_names(client, counter_ids)
+        except Exception as exc:
+            logger.warning("Goal names failed client=%s error=%s", client.id, error_code(exc))
+            return {}
 
     async def audience_interests(self, client, period):
         try:

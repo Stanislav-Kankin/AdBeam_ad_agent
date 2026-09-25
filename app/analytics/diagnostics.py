@@ -36,6 +36,9 @@ from app.storage.repository import safe_json
 
 logger = logging.getLogger(__name__)
 METRICA_REPORT_CACHE_VERSION = 2
+MIN_BEST_CONVERSIONS = 5
+EXTRA_GOALS_LIMIT = 20  # two more Direct report batches at most
+MAX_GOALS_SHOWN = 8
 WAREHOUSE_DIMENSIONS = ("device", "geo", "search", "placement")
 
 
@@ -341,6 +344,20 @@ class CheckService:
             logger.warning("Campaign goals failed client=%s error=%s", client.id, exc)
             return {**base, "status": "unavailable", "limitations": [f"direct: {exc}"]}
         goal_ids = sorted({goal for row in settings.values() for goal in row["goal_ids"]})
+        names = {
+            str(goal["id"]): goal["name"]
+            for counter in await self.repository.client_counters(client.id)
+            for goal in counter.get("goals") or []
+        }
+        blind = [row for row in settings.values() if not row.get("primary_goal_id")]
+        if blind or set(goal_ids) - names.keys():
+            counters = sorted({c for row in settings.values() for c in row.get("counter_ids", [])})
+            names.update(await self.provider.goal_names(client, counters))
+        if blind:
+            # Some campaigns (often Master campaigns) expose no goal through the API.
+            # Their goal may be one no other campaign uses, so request the counters'
+            # goals too; otherwise such a campaign could never win.
+            goal_ids = sorted({*goal_ids, *list(names)[:EXTRA_GOALS_LIMIT]})
         if not goal_ids:
             return {
                 **base,
@@ -412,11 +429,9 @@ class CheckService:
             totals = {
                 key: row for key, row in totals.items() if key in wanted or row["name"] in wanted
             }
-        names = {
-            str(goal["id"]): goal["name"]
-            for counter in await self.repository.client_counters(client.id)
-            for goal in counter.get("goals") or []
-        }
+
+        def goal_name(goal):
+            return names.get(goal) or f"цель {goal} (название недоступно)"
 
         def ratio(numerator, denominator, scale=1):
             return (
@@ -430,8 +445,18 @@ class CheckService:
             if not row["spend"] and not row["clicks"]:
                 continue
             meta = settings.get(campaign_id, {})
-            own = meta.get("goal_ids", [])
-            conversions = sum((row["goals"].get(goal, Decimal(0)) for goal in own), Decimal(0))
+            primary = meta.get("primary_goal_id")
+            conversions = row["goals"].get(primary, Decimal(0)) if primary else None
+            # Goals the campaign converts on although they are not in its settings,
+            # e.g. a Master campaign whose goal the API did not expose.
+            observed = sorted(
+                (
+                    (goal, value)
+                    for goal, value in row["goals"].items()
+                    if value and goal != primary
+                ),
+                key=lambda item: -item[1],
+            )[:3]
             campaigns.append(
                 {
                     "id": campaign_id,
@@ -440,64 +465,89 @@ class CheckService:
                     "type": meta.get("type", ""),
                     "spend": row["spend"],
                     "clicks": row["clicks"],
-                    "goals": [
+                    "primary_goal": {"id": primary, "name": goal_name(primary)}
+                    if primary
+                    else None,
+                    "conversions": conversions,
+                    "cpa": ratio(row["spend"], conversions) if primary else None,
+                    "cr": ratio(conversions, row["clicks"], 100) if primary else None,
+                    "other_goals": [
                         {
                             "id": goal,
-                            "name": names.get(goal, f"Цель {goal}"),
-                            "role": "key"
-                            if goal in meta.get("priority_goal_ids", [])
-                            else "strategy",
-                            "conversions": row["goals"].get(goal, Decimal(0)),
-                            "cpa": ratio(row["spend"], row["goals"].get(goal)),
+                            "name": goal_name(goal),
+                            "conversions": value,
+                            "in_settings": goal in meta.get("goal_ids", []),
                         }
-                        for goal in own
+                        for goal, value in observed
                     ],
-                    "conversions": conversions if own else None,
-                    "cpa": ratio(row["spend"], conversions) if own else None,
-                    "cr": ratio(conversions, row["clicks"], 100) if own else None,
                 }
             )
         campaigns.sort(key=lambda row: row["spend"], reverse=True)
+
+        # Direct attributes a goal's conversions to every campaign that brought them,
+        # whatever the campaign settings, so campaigns are compared goal by goal. Every
+        # campaign with conversions takes part, configured or not, so a campaign whose
+        # settings the API did not expose is not silently excluded. Goals that are some
+        # campaign's primary goal come first; micro goals follow and are capped.
+        primaries = {}
+        for row in campaigns:
+            if row["primary_goal"]:
+                primaries.setdefault(row["primary_goal"]["id"], []).append(row["id"])
+        volume = {
+            goal: sum((row["goals"].get(goal) or Decimal(0) for row in totals.values()), Decimal(0))
+            for goal in goal_ids
+        }
+        order = sorted(
+            (goal for goal in goal_ids if goal in primaries or volume[goal]),
+            key=lambda goal: (-len(primaries.get(goal, [])), -volume[goal]),
+        )[:MAX_GOALS_SHOWN]
         by_goal = []
-        for goal in goal_ids:
-            ranked = [
-                {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "conversions": item["conversions"],
-                    "cpa": item["cpa"],
-                    "spend": row["spend"],
-                }
-                for row in campaigns
-                for item in row["goals"]
-                if item["id"] == goal
-            ]
-            if not ranked:
-                continue
-            ranked.sort(key=lambda r: (r["cpa"] is None, r["cpa"] or 0, -r["conversions"]))
+        for goal in order:
+            owners = primaries.get(goal, [])
+            ranked = []
+            for campaign_id, row in totals.items():
+                value = row["goals"].get(goal) or Decimal(0)
+                if not value and campaign_id not in owners:
+                    continue
+                ranked.append(
+                    {
+                        "id": campaign_id,
+                        "name": settings.get(campaign_id, {}).get("name") or row["name"],
+                        "conversions": value,
+                        "cpa": ratio(row["spend"], value),
+                        "spend": row["spend"],
+                        "goal_is_primary": campaign_id in owners,
+                        "goal_in_settings": goal
+                        in settings.get(campaign_id, {}).get("goal_ids", []),
+                    }
+                )
+            total = sum((r["conversions"] for r in ranked), Decimal(0))
+            # A campaign with a couple of conversions must not win on a lucky CPA.
+            floor = max(Decimal(MIN_BEST_CONVERSIONS), total * Decimal("0.05"))
+            eligible = [r for r in ranked if r["conversions"] >= floor and r["cpa"] is not None]
+            ranked.sort(key=lambda r: -r["conversions"])
             by_goal.append(
                 {
                     "goal_id": goal,
-                    "name": names.get(goal, f"Цель {goal}"),
-                    "conversions": sum((r["conversions"] for r in ranked), Decimal(0)),
-                    "best": ranked[0] if ranked[0]["cpa"] is not None else None,
+                    "name": goal_name(goal),
+                    "primary_for_campaigns": len(owners),
+                    "conversions": total,
+                    "best_by_cpa": min(eligible, key=lambda r: r["cpa"]) if eligible else None,
+                    "most_conversions": ranked[0] if ranked and ranked[0]["conversions"] else None,
                     "campaigns": ranked[:top_n],
                 }
             )
-        without = [row for row in campaigns if row["conversions"] is None]
+        without = [row for row in campaigns if row["primary_goal"] is None]
         if without:
             limitations.append(
-                f"{len(without)} кампаний с расходом без целей в настройках; "
-                "они не участвуют в сравнении по целям."
+                f"У {len(without)} кампаний Директ не отдал цель в настройках; они всё равно "
+                "участвуют в сравнении по целям, на которые у них есть конверсии."
             )
         if len(chunks) > 1:
             limitations.append(
                 f"Период {(end - start).days + 1} дн. собран из {len(chunks)} отчётов Директа "
                 "по 90 дней и суммирован."
             )
-        limitations.append(
-            "Разные кампании могут вести на разные цели: сравнивай CPA внутри одной цели (by_goal)."
-        )
         audience = None
         if segment:
             audience = await self.goal_segments(
@@ -509,13 +559,9 @@ class CheckService:
                 "status": "ok",
                 "audience": audience,
                 "attribution": client.direct.attribution_model,
-                "goals_found": len(goal_ids),
                 "by_goal": by_goal,
                 "campaigns": campaigns[:top_n],
                 "total_campaigns": len(campaigns),
-                "campaigns_without_goals": [
-                    {"id": r["id"], "name": r["name"], "spend": r["spend"]} for r in without[:10]
-                ],
                 "limitations": limitations,
             }
         )
@@ -526,7 +572,7 @@ class CheckService:
         rows = await load(segment)
         if rows is None:
             return {"dimension": segment, "status": "unavailable"}
-        selected = {row["id"] for row in campaigns if row["conversions"] is not None}
+        selected = {row["id"] for row in campaigns if row["primary_goal"]}
 
         def summary(items):
             clicks = sum(item["clicks"] for item in items) or 0
@@ -557,16 +603,14 @@ class CheckService:
         for row in rows.values():
             if row["campaign_id"] not in selected:
                 continue
-            own = settings.get(row["campaign_id"], {}).get("goal_ids", [])
+            primary = settings.get(row["campaign_id"], {}).get("primary_goal_id")
             items.append(
                 {
                     "campaign_id": row["campaign_id"],
                     "segment": row["segment"],
                     "clicks": row["clicks"],
                     "spend": row["spend"],
-                    "conversions": sum(
-                        (row["goals"].get(goal, Decimal(0)) for goal in own), Decimal(0)
-                    ),
+                    "conversions": row["goals"].get(primary, Decimal(0)),
                 }
             )
         by_campaign = [
