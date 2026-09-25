@@ -14,6 +14,17 @@ from app.security import redact
 
 REPORTS_URL = "https://api.direct.yandex.com/json/v5/reports"
 CAMPAIGNS_URL = "https://api.direct.yandex.com/json/v5/campaigns"
+# Unified performance campaigns (what the Master of campaigns creates) are listed by
+# API version 5.01 only; v5 silently leaves them out although Reports count them.
+CAMPAIGNS_URL_V501 = "https://api.direct.yandex.com/json/v501/campaigns"
+ALL_CAMPAIGN_TYPES = [
+    "TEXT_CAMPAIGN",
+    "UNIFIED_CAMPAIGN",
+    "DYNAMIC_TEXT_CAMPAIGN",
+    "SMART_CAMPAIGN",
+    "MOBILE_APP_CAMPAIGN",
+    "CPM_BANNER_CAMPAIGN",
+]
 BID_MODIFIERS_URL = "https://api.direct.yandex.com/json/v5/bidmodifiers"
 SEGMENT_FIELDS = {"gender": "Gender", "age": "Age", "income": "IncomeGrade"}
 DIMENSIONS = {
@@ -35,6 +46,32 @@ GOAL_CAMPAIGN_TYPES = ("TextCampaign", "UnifiedCampaign", "DynamicTextCampaign",
 logger = logging.getLogger(__name__)
 
 
+async def get_campaigns(transport, headers, params):
+    """Campaigns.get through v501 with every campaign type, falling back to v5 (the
+    previous behaviour) if v501 rejects the request."""
+    v501 = {
+        **params,
+        "SelectionCriteria": {**params["SelectionCriteria"], "Types": ALL_CAMPAIGN_TYPES},
+    }
+    try:
+        return await transport.json(
+            "direct",
+            "POST",
+            CAMPAIGNS_URL_V501,
+            headers=headers,
+            json={"method": "get", "params": v501},
+        )
+    except IntegrationError as exc:
+        logger.warning("Campaigns v501 failed, using v5 error=%s", exc)
+        return await transport.json(
+            "direct",
+            "POST",
+            CAMPAIGNS_URL,
+            headers=headers,
+            json={"method": "get", "params": params},
+        )
+
+
 def strategy_goals(value):
     """Goal IDs a bidding strategy optimises for, wherever the strategy nests them.
     Small IDs are Direct placeholders (for example 13 = "key goals"), not Metrica goals."""
@@ -54,7 +91,7 @@ def strategy_goals(value):
 def parse_goal_tsv(text: str, goals: list[str], attribution: str, segment: str | None = None):
     """Campaign rows with conversions kept per goal instead of summed; with a
     segment field (Gender, Age, IncomeGrade) the key is "<campaign>|<value>"."""
-    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")), delimiter="\t")
+    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")), delimiter="\t")
     required = {"CampaignId", "CampaignName", "Cost", "Impressions", "Clicks"}
     if segment:
         required.add(segment)
@@ -229,25 +266,13 @@ class DirectAdapter:
     async def campaigns(self, client):
         rows, offset = [], 0
         for _ in range(20):
-            data = await self.transport.json(
-                "direct",
-                "POST",
-                CAMPAIGNS_URL,
-                headers=self.headers(client),
-                json={
-                    "method": "get",
-                    "params": {
-                        "SelectionCriteria": {},
-                        "FieldNames": [
-                            "Id",
-                            "Name",
-                            "State",
-                            "Status",
-                            "StatusPayment",
-                            "Currency",
-                        ],
-                        "Page": {"Limit": 1000, "Offset": offset},
-                    },
+            data = await get_campaigns(
+                self.transport,
+                self.headers(client),
+                {
+                    "SelectionCriteria": {},
+                    "FieldNames": ["Id", "Name", "State", "Status", "StatusPayment", "Currency"],
+                    "Page": {"Limit": 1000, "Offset": offset},
                 },
             )
             result = data.get("result", {})
@@ -279,27 +304,22 @@ class DirectAdapter:
     async def campaign_goals_of(self, client, kinds):
         campaigns, offset = {}, 0
         for _ in range(20):
-            data = await self.transport.json(
-                "direct",
-                "POST",
-                CAMPAIGNS_URL,
-                headers=self.headers(client),
-                json={
-                    "method": "get",
-                    "params": {
-                        "SelectionCriteria": {},
-                        "FieldNames": ["Id", "Name", "State", "Type"],
-                        **{
-                            f"{kind}FieldNames": [
-                                "PriorityGoals",
-                                "BiddingStrategy",
-                                # Smart campaigns name it CounterId and are skipped here.
-                                *(["CounterIds"] if kind != "SmartCampaign" else []),
-                            ]
-                            for kind in kinds
-                        },
-                        "Page": {"Limit": 1000, "Offset": offset},
+            data = await get_campaigns(
+                self.transport,
+                self.headers(client),
+                {
+                    "SelectionCriteria": {},
+                    "FieldNames": ["Id", "Name", "State", "Type"],
+                    **{
+                        f"{kind}FieldNames": [
+                            "PriorityGoals",
+                            "BiddingStrategy",
+                            # Smart campaigns name it CounterId and are skipped here.
+                            *(["CounterIds"] if kind != "SmartCampaign" else []),
+                        ]
+                        for kind in kinds
                     },
+                    "Page": {"Limit": 1000, "Offset": offset},
                 },
             )
             result = data.get("result", {})

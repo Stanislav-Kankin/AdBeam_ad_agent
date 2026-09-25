@@ -209,3 +209,52 @@ async def test_goal_tool_range_does_not_become_the_chart_period(runtime):
     assert context["active_client_id"] == "west_export"
     period = context.get("period")
     assert period is None or {"current", "previous"} <= period.keys()
+
+
+async def test_campaigns_are_listed_through_v501_with_master_campaigns(client, monkeypatch):
+    # Rusagro: v5 listed six text campaigns and silently left out Master campaigns.
+    import json as jsonlib
+
+    monkeypatch.setenv("DIRECT_OAUTH_TOKEN", "test-token-not-real")
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        body = jsonlib.loads(request.read())
+        assert "UNIFIED_CAMPAIGN" in body["params"]["SelectionCriteria"]["Types"]
+        return httpx.Response(
+            200,
+            json={
+                "result": {
+                    "Campaigns": [
+                        {
+                            "Id": 1,
+                            "Name": "МК",
+                            "State": "ON",
+                            "Type": "UNIFIED_CAMPAIGN",
+                            "UnifiedCampaign": {"PriorityGoals": {"Items": [{"GoalId": 9001}]}},
+                        }
+                    ]
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        goals = await DirectAdapter(ReadTransport(http)).campaign_goals(client)
+    assert seen == ["/json/v501/campaigns"]
+    assert goals["1"]["primary_goal_id"] == "9001"
+
+
+async def test_campaign_list_falls_back_to_v5(client, monkeypatch):
+    monkeypatch.setenv("DIRECT_OAUTH_TOKEN", "test-token-not-real")
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        if "v501" in request.url.path:
+            return httpx.Response(400, json={"error": {"error_code": 8000}})
+        return httpx.Response(200, json={"result": {"Campaigns": []}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        assert await DirectAdapter(ReadTransport(http)).campaigns(client) == []
+    assert seen == ["/json/v501/campaigns", "/json/v5/campaigns"]

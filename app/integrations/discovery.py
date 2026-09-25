@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.config import secret_from_env
 from app.domain.clients import Client, DirectConfig, MetricaConfig, TelegramConfig
+from app.integrations.direct import get_campaigns
 from app.integrations.http import IntegrationError
 
 logger = logging.getLogger(__name__)
@@ -102,24 +103,16 @@ async def campaign_counters(transport, client):
     if not token:
         raise IntegrationError("direct", "missing_token")
     while True:
-        data = await transport.json(
-            "direct",
-            "POST",
-            "https://api.direct.yandex.com/json/v5/campaigns",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Client-Login": client.direct.client_login,
-            },
-            json={
-                "method": "get",
-                "params": {
-                    "SelectionCriteria": {},
-                    "FieldNames": ["Id"],
-                    "TextCampaignFieldNames": ["CounterIds"],
-                    "UnifiedCampaignFieldNames": ["CounterIds"],
-                    "CpmBannerCampaignFieldNames": ["CounterIds"],
-                    "Page": {"Limit": 1000, "Offset": offset},
-                },
+        data = await get_campaigns(
+            transport,
+            {"Authorization": f"Bearer {token}", "Client-Login": client.direct.client_login},
+            {
+                "SelectionCriteria": {},
+                "FieldNames": ["Id"],
+                "TextCampaignFieldNames": ["CounterIds"],
+                "UnifiedCampaignFieldNames": ["CounterIds"],
+                "CpmBannerCampaignFieldNames": ["CounterIds"],
+                "Page": {"Limit": 1000, "Offset": offset},
             },
         )
         result = data["result"]
