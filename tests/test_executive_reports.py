@@ -157,6 +157,31 @@ async def test_audience_breakdown_is_readable_and_cached(runtime, client, monkey
     assert "аффинити" in text
 
 
+async def test_failed_audience_is_not_cached_and_says_so(runtime, client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.domain.reports import DataStatus, DirectData
+
+    period = make_period("14d")
+
+    async def broken(_client, date_range, dimension="campaign"):
+        return DirectData(
+            status=DataStatus.UNAVAILABLE,
+            period=date_range,
+            limitations=["direct: report_pending_timeout"],
+        )
+
+    spy = AsyncMock(side_effect=broken)
+    monkeypatch.setattr(runtime.checks.provider, "breakdown", spy)
+    first = await runtime.checks.audience(client, period)
+    await runtime.checks.audience(client, period)
+    text = audience_report(client.name, first)
+
+    assert spy.await_count == 6  # three slices, retried: the failure was not cached
+    assert "не загрузилось из Директа" in text
+    assert "• нет данных" not in text
+
+
 async def test_metrica_campaign_report_compares_periods_and_is_cached(runtime, client, monkeypatch):
     from unittest.mock import AsyncMock
 

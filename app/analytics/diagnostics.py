@@ -281,8 +281,18 @@ class CheckService:
             )
 
     async def audience(self, client, period):
+        def failed(payload):
+            return (
+                any(
+                    value.get("status") == DataStatus.UNAVAILABLE.value
+                    for value in payload.get("direct", {}).values()
+                )
+                or payload.get("interests", {}).get("status") == "unavailable"
+            )
+
         cached = await self.repository.cached_analysis(client.id, period.current, "audience")
-        if cached is not None:
+        # A cached failure would hide the audience for hours; retry it instead.
+        if cached is not None and not failed(cached):
             logger.info("Audience cache hit client=%s", client.id)
             return cached
         age, gender, income, interests = await asyncio.gather(
@@ -300,7 +310,14 @@ class CheckService:
             },
             "interests": interests,
         }
-        await self.repository.save_analysis(client.id, period.current, "audience", result)
+        if failed(result):
+            logger.warning(
+                "Audience partly unavailable client=%s limitations=%s",
+                client.id,
+                [v.limitations for v in (age, gender, income)],
+            )
+        else:
+            await self.repository.save_analysis(client.id, period.current, "audience", result)
         return result
 
     async def metrica_report(

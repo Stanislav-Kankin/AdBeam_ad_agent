@@ -512,6 +512,10 @@ def audience_report(client_name, payload) -> str:
         rows = [row for row in report.rows if (row.totals.clicks or 0) > 0]
         total = sum(row.totals.clicks or 0 for row in rows)
         lines.append(f"{labels[key]}:")
+        if report.status.value == "unavailable":
+            # A failed Direct report is not the same as an empty audience.
+            lines.append("• не загрузилось из Директа — повторите через несколько минут")
+            continue
         if not rows or not total:
             lines.append("• нет данных")
             continue
