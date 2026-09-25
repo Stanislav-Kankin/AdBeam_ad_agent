@@ -326,6 +326,170 @@ class CheckService:
             await self.repository.save_analysis(client.id, period.current, "audience", result)
         return result
 
+    async def campaign_goal_performance(self, client, start, end, *, top_n=20):
+        """Campaigns judged by the goals configured inside them (key goals and the
+        strategy goal). Works without selected main goals and without Metrica, and
+        covers up to a year by summing additive Direct totals over <=90-day chunks."""
+        base = {"period": {"start": str(start), "end": str(end)}, "source": "Direct Reports"}
+        try:
+            settings = await self.provider.campaign_goals(client)
+        except Exception as exc:
+            logger.warning("Campaign goals failed client=%s error=%s", client.id, exc)
+            return {**base, "status": "unavailable", "limitations": [f"direct: {exc}"]}
+        goal_ids = sorted({goal for row in settings.values() for goal in row["goal_ids"]})
+        if not goal_ids:
+            return {
+                **base,
+                "status": "no_campaign_goals",
+                "limitations": [
+                    "Ни в одной кампании не заданы ключевые цели или цель стратегии; "
+                    "сравнивать по целям кампаний нечем."
+                ],
+            }
+        chunks, cursor = [], start
+        while cursor <= end:
+            chunk_end = min(end, cursor + timedelta(days=89))
+            chunks.append(DateRange(start=cursor, end=chunk_end))
+            cursor = chunk_end + timedelta(days=1)
+        kind = "cg" + hashlib.sha256(json.dumps(goal_ids).encode("utf-8")).hexdigest()[:8]
+        totals, limitations = {}, []
+        for chunk in chunks:
+            rows = await self.repository.cached_analysis(client.id, chunk, kind)
+            if rows is None:
+                try:
+                    rows = safe_json(await self.provider.goal_report(client, chunk, goal_ids))
+                except Exception as exc:
+                    logger.warning(
+                        "Goal report failed client=%s period=%s..%s error=%s",
+                        client.id,
+                        chunk.start,
+                        chunk.end,
+                        exc,
+                    )
+                    return {
+                        **base,
+                        "status": "unavailable",
+                        "limitations": [f"direct: {exc} ({chunk.label()})"],
+                    }
+                await self.repository.save_analysis(client.id, chunk, kind, rows, ttl_hours=6)
+            for campaign_id, row in rows.items():
+                target = totals.setdefault(
+                    campaign_id,
+                    {
+                        "name": row["name"],
+                        "spend": Decimal(0),
+                        "clicks": 0,
+                        "impressions": 0,
+                        "goals": {},
+                    },
+                )
+                target["spend"] += amount(row["spend"])
+                target["clicks"] += int(row["clicks"] or 0)
+                target["impressions"] += int(row["impressions"] or 0)
+                for goal, value in row["goals"].items():
+                    target["goals"][goal] = target["goals"].get(goal, Decimal(0)) + amount(value)
+        names = {
+            str(goal["id"]): goal["name"]
+            for counter in await self.repository.client_counters(client.id)
+            for goal in counter.get("goals") or []
+        }
+
+        def ratio(numerator, denominator, scale=1):
+            return (
+                (Decimal(numerator) * scale / Decimal(denominator)).quantize(Decimal("0.01"))
+                if denominator
+                else None
+            )
+
+        campaigns = []
+        for campaign_id, row in totals.items():
+            if not row["spend"] and not row["clicks"]:
+                continue
+            meta = settings.get(campaign_id, {})
+            own = meta.get("goal_ids", [])
+            conversions = sum((row["goals"].get(goal, Decimal(0)) for goal in own), Decimal(0))
+            campaigns.append(
+                {
+                    "id": campaign_id,
+                    "name": meta.get("name") or row["name"],
+                    "state": meta.get("state", ""),
+                    "type": meta.get("type", ""),
+                    "spend": row["spend"],
+                    "clicks": row["clicks"],
+                    "goals": [
+                        {
+                            "id": goal,
+                            "name": names.get(goal, f"Цель {goal}"),
+                            "role": "key"
+                            if goal in meta.get("priority_goal_ids", [])
+                            else "strategy",
+                            "conversions": row["goals"].get(goal, Decimal(0)),
+                            "cpa": ratio(row["spend"], row["goals"].get(goal)),
+                        }
+                        for goal in own
+                    ],
+                    "conversions": conversions if own else None,
+                    "cpa": ratio(row["spend"], conversions) if own else None,
+                    "cr": ratio(conversions, row["clicks"], 100) if own else None,
+                }
+            )
+        campaigns.sort(key=lambda row: row["spend"], reverse=True)
+        by_goal = []
+        for goal in goal_ids:
+            ranked = [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "conversions": item["conversions"],
+                    "cpa": item["cpa"],
+                    "spend": row["spend"],
+                }
+                for row in campaigns
+                for item in row["goals"]
+                if item["id"] == goal
+            ]
+            if not ranked:
+                continue
+            ranked.sort(key=lambda r: (r["cpa"] is None, r["cpa"] or 0, -r["conversions"]))
+            by_goal.append(
+                {
+                    "goal_id": goal,
+                    "name": names.get(goal, f"Цель {goal}"),
+                    "conversions": sum((r["conversions"] for r in ranked), Decimal(0)),
+                    "best": ranked[0] if ranked[0]["cpa"] is not None else None,
+                    "campaigns": ranked[:top_n],
+                }
+            )
+        without = [row for row in campaigns if row["conversions"] is None]
+        if without:
+            limitations.append(
+                f"{len(without)} кампаний с расходом без целей в настройках; "
+                "они не участвуют в сравнении по целям."
+            )
+        if len(chunks) > 1:
+            limitations.append(
+                f"Период {(end - start).days + 1} дн. собран из {len(chunks)} отчётов Директа "
+                "по 90 дней и суммирован."
+            )
+        limitations.append(
+            "Разные кампании могут вести на разные цели: сравнивай CPA внутри одной цели (by_goal)."
+        )
+        return safe_json(
+            {
+                **base,
+                "status": "ok",
+                "attribution": client.direct.attribution_model,
+                "goals_found": len(goal_ids),
+                "by_goal": by_goal,
+                "campaigns": campaigns[:top_n],
+                "total_campaigns": len(campaigns),
+                "campaigns_without_goals": [
+                    {"id": r["id"], "name": r["name"], "spend": r["spend"]} for r in without[:10]
+                ],
+                "limitations": limitations,
+            }
+        )
+
     async def metrica_report(
         self, client, period, report_type, *, goal_ids=None, campaign_ids=None, top_n=20
     ):

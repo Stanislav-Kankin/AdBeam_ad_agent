@@ -27,8 +27,50 @@ DIMENSIONS = {
 }
 REPORT_PAGE_SIZE = 10000
 REPORT_MAX_PAGES = 100
+REPORT_GOALS_LIMIT = 10  # Direct Reports accepts at most ten goals per report
+GOAL_CAMPAIGN_TYPES = ("TextCampaign", "UnifiedCampaign", "DynamicTextCampaign", "SmartCampaign")
 
 logger = logging.getLogger(__name__)
+
+
+def strategy_goals(value):
+    """Goal IDs a bidding strategy optimises for, wherever the strategy nests them.
+    Small IDs are Direct placeholders (for example 13 = "key goals"), not Metrica goals."""
+    found = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "GoalId" and child is not None and int(child) > 1000:
+                found.append(str(child))
+            else:
+                found.extend(strategy_goals(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(strategy_goals(child))
+    return found
+
+
+def parse_goal_tsv(text: str, goals: list[str], attribution: str):
+    """Campaign rows with conversions kept per goal instead of summed."""
+    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")), delimiter="	")
+    required = {"CampaignId", "CampaignName", "Cost", "Impressions", "Clicks"}
+    columns = {goal: f"Conversions_{goal}_{attribution}" for goal in goals}
+    if not reader.fieldnames or not required.issubset(reader.fieldnames):
+        raise IntegrationError("direct", "invalid_tsv_columns")
+    if not set(columns.values()).issubset(reader.fieldnames):
+        raise IntegrationError("direct", "missing_goal_columns")
+    rows = {}
+    for raw in reader:
+        rows[str(raw["CampaignId"])] = {
+            "name": redact(str(raw.get("CampaignName") or ""))[:200],
+            "spend": number(raw.get("Cost")),
+            "impressions": int(number(raw.get("Impressions"))),
+            "clicks": int(number(raw.get("Clicks"))),
+            "goals": {
+                goal: Decimal(0) if raw.get(column) in ("--", "") else number(raw.get(column))
+                for goal, column in columns.items()
+            },
+        }
+    return rows
 
 
 def parse_tsv(text: str, goals: list[str], attribution: str, fields: list[str]):
@@ -214,6 +256,107 @@ class DirectAdapter:
                 return rows
             offset = int(result["LimitedBy"])
         raise IntegrationError("direct", "campaign_limit")
+
+    async def campaign_goals(self, client):
+        """Goals set inside each campaign: key goals (PriorityGoals) and the strategy goal."""
+        try:
+            return await self.campaign_goals_of(client, GOAL_CAMPAIGN_TYPES)
+        except IntegrationError as exc:
+            # A field unsupported for one campaign type fails the whole request;
+            # text and unified campaigns cover most accounts.
+            logger.warning("Campaign goals retry client=%s error=%s", client.id, exc)
+            return await self.campaign_goals_of(client, ("TextCampaign", "UnifiedCampaign"))
+
+    async def campaign_goals_of(self, client, kinds):
+        campaigns, offset = {}, 0
+        for _ in range(20):
+            data = await self.transport.json(
+                "direct",
+                "POST",
+                CAMPAIGNS_URL,
+                headers=self.headers(client),
+                json={
+                    "method": "get",
+                    "params": {
+                        "SelectionCriteria": {},
+                        "FieldNames": ["Id", "Name", "State", "Type"],
+                        **{
+                            f"{kind}FieldNames": ["PriorityGoals", "BiddingStrategy"]
+                            for kind in kinds
+                        },
+                        "Page": {"Limit": 1000, "Offset": offset},
+                    },
+                },
+            )
+            result = data.get("result", {})
+            if not isinstance(result.get("Campaigns"), list):
+                raise IntegrationError("direct", "invalid_campaign_response")
+            for row in result["Campaigns"]:
+                settings = next(
+                    (row[kind] for kind in kinds if isinstance(row.get(kind), dict)),
+                    {},
+                )
+                priority = [
+                    str(item["GoalId"])
+                    for item in (settings.get("PriorityGoals") or {}).get("Items") or []
+                    if item.get("GoalId") and int(item["GoalId"]) > 1000
+                ]
+                strategy = strategy_goals(settings.get("BiddingStrategy"))
+                campaigns[str(row["Id"])] = {
+                    "name": redact(str(row.get("Name") or ""))[:200],
+                    "state": str(row.get("State") or ""),
+                    "type": str(row.get("Type") or ""),
+                    "priority_goal_ids": priority,
+                    "strategy_goal_ids": strategy,
+                    "goal_ids": list(dict.fromkeys(priority + strategy)),
+                }
+            if "LimitedBy" not in result:
+                return campaigns
+            offset = int(result["LimitedBy"])
+        raise IntegrationError("direct", "campaign_limit")
+
+    async def goal_report(self, client, period, goal_ids):
+        """Campaign spend and conversions per goal; goals are requested in batches of ten."""
+        merged = {}
+        for index in range(0, len(goal_ids), REPORT_GOALS_LIMIT):
+            batch = goal_ids[index : index + REPORT_GOALS_LIMIT]
+            params = {
+                "SelectionCriteria": {"DateFrom": str(period.start), "DateTo": str(period.end)},
+                "FieldNames": [
+                    "CampaignId",
+                    "CampaignName",
+                    "Impressions",
+                    "Clicks",
+                    "Cost",
+                    "Conversions",
+                ],
+                "ReportType": "CAMPAIGN_PERFORMANCE_REPORT",
+                "DateRangeType": "CUSTOM_DATE",
+                "Format": "TSV",
+                "IncludeVAT": "NO",
+                "IncludeDiscount": "NO",
+                "Goals": batch,
+                "AttributionModels": [client.direct.attribution_model],
+            }
+            params["ReportName"] = (
+                "adbeam_goals_"
+                + hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:24]
+            )
+            async with self.report_lock(client):
+                response = await self.transport.request(
+                    "direct",
+                    "POST",
+                    REPORTS_URL,
+                    pending=True,
+                    headers=self.headers(client),
+                    json={"params": params},
+                )
+            for campaign_id, row in parse_goal_tsv(
+                response.text, batch, client.direct.attribution_model
+            ).items():
+                target = merged.setdefault(campaign_id, {**row, "goals": {}})
+                target["goals"].update(row["goals"])
+        return merged
 
     async def overview(self, client, period):
         report, campaigns = await asyncio.gather(

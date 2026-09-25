@@ -20,6 +20,8 @@ class AnalyticsProvider(Protocol):
     async def breakdown_page(self, client, period, dimension, page): ...
     async def audience_interests(self, client, period): ...
     async def metrica_direct_report(self, client, period, report_type, **kwargs): ...
+    async def campaign_goals(self, client): ...
+    async def goal_report(self, client, period, goal_ids): ...
 
 
 def error_code(exc):
@@ -55,6 +57,12 @@ class ProductionProvider:
                 error_code(exc),
             )
             raise
+
+    async def campaign_goals(self, client):
+        return await self.direct.campaign_goals(client)
+
+    async def goal_report(self, client, period, goal_ids):
+        return await self.direct.goal_report(client, period, goal_ids)
 
     async def audience_interests(self, client, period):
         try:

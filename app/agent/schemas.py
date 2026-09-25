@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
-from app.analytics.periods import AnalysisPeriod, DateRange, make_period
+from app.analytics.periods import AnalysisPeriod, DateRange, make_period, today_moscow
 from app.domain.clients import StrictModel
 
 
@@ -113,3 +113,44 @@ class MetricaReportArgs(ClientArgs):
         if any(not value.isdigit() for value in cleaned):
             raise ValueError("Goal IDs must be numeric.")
         return cleaned
+
+
+class CampaignGoalArgs(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    client_id: str = Field(
+        min_length=1,
+        max_length=200,
+        description="ID, точное имя, логин или алиас клиента из list_clients.",
+    )
+    days: int = Field(
+        default=30,
+        ge=1,
+        le=366,
+        description="Последние N завершённых дней, до 366 (4 месяца = 120).",
+    )
+    start_date: date | None = None
+    end_date: date | None = None
+    top_n: int = Field(default=20, ge=1, le=50)
+
+    @field_validator("client_id")
+    @classmethod
+    def clean_client(cls, value):
+        return ClientArgs.clean_client(value)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        self.date_range()
+        return self
+
+    def date_range(self):
+        if (self.start_date is None) != (self.end_date is None):
+            raise ValueError("Укажите обе даты: start_date и end_date.")
+        yesterday = today_moscow() - timedelta(days=1)
+        start, end = (
+            (self.start_date, self.end_date)
+            if self.start_date
+            else (yesterday - timedelta(days=self.days - 1), yesterday)
+        )
+        if end > yesterday or start > end or (end - start).days + 1 > 366:
+            raise ValueError("Период: завершённые дни, не больше 366.")
+        return start, end

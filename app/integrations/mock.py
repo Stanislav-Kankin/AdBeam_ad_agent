@@ -128,6 +128,42 @@ class MockProvider:
         report = await self.breakdown(client, period, dimension)
         return report.rows, True
 
+    async def campaign_goals(self, client):
+        return {
+            "101": {
+                "name": "Поиск — основные товары",
+                "state": "ON",
+                "type": "TEXT_CAMPAIGN",
+                "priority_goal_ids": ["5001"],
+                "strategy_goal_ids": [],
+                "goal_ids": ["5001"],
+            },
+            "102": {
+                "name": "РСЯ — каталог",
+                "state": "ON",
+                "type": "TEXT_CAMPAIGN",
+                "priority_goal_ids": [],
+                "strategy_goal_ids": ["5002"],
+                "goal_ids": ["5002"],
+            },
+        }
+
+    async def goal_report(self, client, period, goal_ids):
+        rows = {}
+        for row in (await self.breakdown(client, period, "campaign")).rows:
+            own = "5001" if row.id == "101" else "5002"
+            rows[row.id] = {
+                "name": row.name,
+                "spend": row.totals.spend,
+                "impressions": row.totals.impressions,
+                "clicks": row.totals.clicks,
+                "goals": {
+                    goal: Decimal(row.totals.conversions or 0) if goal == own else Decimal(0)
+                    for goal in goal_ids
+                },
+            }
+        return rows
+
     async def audience_interests(self, client, period):
         return {
             "status": "ok",

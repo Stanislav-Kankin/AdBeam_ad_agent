@@ -3,7 +3,7 @@ from time import monotonic
 
 from pydantic import ValidationError
 
-from app.agent.schemas import ClientArgs, ListArgs, MetricaReportArgs
+from app.agent.schemas import CampaignGoalArgs, ClientArgs, ListArgs, MetricaReportArgs
 from app.analytics.diagnostics import drivers, snapshot_metrics
 from app.analytics.metrics import calculate, compare
 from app.analytics.rules import tracking_health
@@ -21,6 +21,7 @@ DESCRIPTIONS = {
     "get_placements": "Топ площадок РСЯ по расходу, кликам и основным конверсиям.",
     "get_audience_breakdown": "Возраст, пол и уровень дохода рекламного трафика Директа; долгосрочные интересы аудитории сайта из Метрики.",
     "get_metrica_direct_report": "Отчёт Метрики по кампаниям Директа и выбранным целям: кампании, объявления, условия показа, поисковые фразы или площадки; включает поведение и сравнение периодов.",
+    "get_campaign_goal_performance": "Кампании по целям, заданным в их настройках (ключевые цели и цель стратегии): конверсии, CPA и лучшая кампания по каждой цели. Не требует основных целей и Метрики; период до 366 дней без сравнения.",
     "get_metrica_goals": "Доступные цели и достижения основных целей Метрики, без персональных данных.",
     "check_tracking_health": "Проверка поступления данных, наличия целей и исчезновения конверсий. Не является тестом форм на сайте.",
     "get_revenue": "Выручка из настроенного источника, её статус, период и сопоставимость.",
@@ -34,6 +35,12 @@ DIMENSIONS = {
     "get_placements": "placement",
 }
 
+SCHEMAS = {
+    "list_clients": ListArgs,
+    "get_metrica_direct_report": MetricaReportArgs,
+    "get_campaign_goal_performance": CampaignGoalArgs,
+}
+
 
 def tool_schemas():
     return [
@@ -42,13 +49,7 @@ def tool_schemas():
             "function": {
                 "name": name,
                 "description": description,
-                "parameters": (
-                    ListArgs
-                    if name == "list_clients"
-                    else MetricaReportArgs
-                    if name == "get_metrica_direct_report"
-                    else ClientArgs
-                ).model_json_schema(),
+                "parameters": (SCHEMAS.get(name, ClientArgs)).model_json_schema(),
             },
         }
         for name, description in DESCRIPTIONS.items()
@@ -66,13 +67,7 @@ class ToolRegistry:
                 raise PermissionError
             if name not in DESCRIPTIONS:
                 raise ValueError("unknown_tool")
-            schema = (
-                ListArgs
-                if name == "list_clients"
-                else MetricaReportArgs
-                if name == "get_metrica_direct_report"
-                else ClientArgs
-            )
+            schema = SCHEMAS.get(name, ClientArgs)
             args = schema.model_validate_json(arguments)
             validated = args.model_dump(mode="json")
             if name == "list_clients":
@@ -91,6 +86,15 @@ class ToolRegistry:
             if len(matches) != 1:
                 raise PermissionError
             client = matches[0]
+            if name == "get_campaign_goal_performance":
+                first_day, last_day = args.date_range()
+                return {
+                    "client_id": client.id,
+                    "mock": self.checks.provider.mock,
+                    **await self.checks.campaign_goal_performance(
+                        client, first_day, last_day, top_n=args.top_n
+                    ),
+                }
             period = args.analysis_period()
             base = {
                 "client_id": client.id,
