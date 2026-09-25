@@ -39,6 +39,7 @@ METRICA_REPORT_CACHE_VERSION = 2
 MIN_BEST_CONVERSIONS = 5
 EXTRA_GOALS_LIMIT = 20  # two more Direct report batches at most
 MAX_GOALS_SHOWN = 8
+GOALS_REFRESH_SECONDS = 12 * 3600
 WAREHOUSE_DIMENSIONS = ("device", "geo", "search", "placement")
 
 
@@ -102,6 +103,7 @@ class CheckService:
         self.registry, self.provider, self.repository = registry, provider, repository
         self.semaphore = asyncio.Semaphore(3)
         self.schedule_semaphore = asyncio.Semaphore(1)
+        self.goals_checked = {}
 
     async def snapshots(self, client, period, mode=CheckMode.STANDARD):
         return await asyncio.gather(
@@ -150,6 +152,7 @@ class CheckService:
         clients = self.registry.visible(chat_id)
         if not clients:
             return None
+        clients = [await self.ensure_goals(client) for client in clients]
         yesterday = today_moscow() - timedelta(days=1)
         oldest = yesterday - timedelta(days=days - 1)
         existing = await self.repository.fresh_daily_keys(
@@ -170,6 +173,7 @@ class CheckService:
         clients = self.registry.visible(chat_id)
         if not clients:
             return None
+        clients = [await self.ensure_goals(client) for client in clients]
         yesterday = today_moscow() - timedelta(days=1)
         oldest = yesterday - timedelta(days=days - 1)
         progress = await self.repository.dimension_progress(
@@ -328,6 +332,38 @@ class CheckService:
         else:
             await self.repository.save_analysis(client.id, period.current, "audience", result)
         return result
+
+    async def ensure_goals(self, client):
+        """Nobody chose main goals: take each campaign's primary goal from its settings.
+        A person's choice always wins; automatic goals are re-read every 12 hours so
+        the bot follows goal changes made in the ad account."""
+        if client.direct.main_goal_ids and client.direct.goals_source == "manual":
+            return client
+        checked = self.goals_checked.get(client.id)
+        if checked is not None and monotonic() - checked < GOALS_REFRESH_SECONDS:
+            return client
+        self.goals_checked[client.id] = monotonic()
+        try:
+            settings = await self.provider.campaign_goals(client)
+        except Exception as exc:
+            logger.warning("Automatic goals failed client=%s error=%s", client.id, exc)
+            # Retry in ten minutes rather than waiting for the next 12-hour refresh.
+            self.goals_checked[client.id] = monotonic() - GOALS_REFRESH_SECONDS + 600
+            return client
+        # Goals that drive more campaigns first; the Reports API takes at most ten.
+        counts = {}
+        for row in settings.values():
+            if row.get("primary_goal_id"):
+                counts[row["primary_goal_id"]] = counts.get(row["primary_goal_id"], 0) + 1
+        goals = sorted(counts, key=lambda goal: (-counts[goal], goal))[:10]
+        if not goals or (goals == client.direct.main_goal_ids):
+            return client
+        logger.info("Automatic goals client=%s goals=%s", client.id, goals)
+        updated = await self.repository.save_client_preferences(
+            client, goal_ids=goals, goals_source="campaigns"
+        )
+        self.registry.clients[client.id] = updated
+        return updated
 
     async def campaign_goal_performance(
         self, client, start, end, *, top_n=20, segment=None, campaign_ids=None
@@ -1065,6 +1101,7 @@ class CheckService:
                 },
                 limitations=list(dict.fromkeys(limitations)),
                 main_goal_ids=client.metrica.main_goal_ids,
+                goals_source=client.direct.goals_source,
                 targets={
                     "kpi": main_kpi(client),
                     "kpi_stable": kpi_stable(client, a, b),
@@ -1112,6 +1149,7 @@ class CheckService:
         period.completed()
         # Fail closed before any integration is called, even in scheduled/internal paths.
         clients = [self.registry.require(chat_id, cid) for cid in dict.fromkeys(client_ids)]
+        clients = [await self.ensure_goals(client) for client in clients]
         run_id = await self.repository.begin_run(
             chat_id, [c.id for c in clients], period, mode, trigger, user_id=user_id
         )

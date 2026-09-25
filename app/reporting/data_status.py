@@ -85,13 +85,21 @@ async def describe_data(runtime, chat_id, client_id):
     selected = [c for c in counters if c["selected"]]
     lines += [
         "",
-        f"Основных целей: {len(client.direct.main_goal_ids)} из 10",
+        f"Основных целей: {len(client.direct.main_goal_ids)} из 10"
+        + (
+            " (взяты автоматически из настроек кампаний)"
+            if client.direct.goals_source == "campaigns"
+            else ""
+        ),
         f"Выбрано счётчиков в каталоге: {len(selected)}",
     ]
     for c in selected[:5]:
         lines.append(f"• {c['id']}: {c['status']} · проверено {stamp(c['checked_at'])}")
     if not client.direct.main_goal_ids:
-        lines.append("Для CPA выберите основные цели в разделе «Данные и цели».")
+        lines.append(
+            "Основные цели не выбраны; при следующей проверке бот возьмёт их из "
+            "настроек кампаний. Выбрать вручную — «Данные и цели»."
+        )
     job = runtime.schedule.scheduler.get_job("warehouse_warm") if runtime.schedule else None
     eligible = client.id in {
         c.id for c in runtime.registry.visible(runtime.settings.telegram_report_chat_id)

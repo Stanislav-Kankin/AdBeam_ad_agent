@@ -530,7 +530,14 @@ class Repository:
                 targets = client.targets
         return client.model_copy(
             update={
-                "direct": client.direct.model_copy(update={"main_goal_ids": goals}),
+                "direct": client.direct.model_copy(
+                    update={
+                        "main_goal_ids": goals,
+                        "goals_source": "campaigns"
+                        if row.goals_source == "campaigns" and goals
+                        else "manual",
+                    }
+                ),
                 "metrica": client.metrica.model_copy(
                     update={
                         "counter_id": None,
@@ -551,6 +558,7 @@ class Repository:
         goal_roles=None,
         targets=None,
         user_id=None,
+        goals_source="manual",
     ):
         async with self.write_session() as session:
             row = await session.get(ClientPreference, (self.app_mode, client.id))
@@ -568,7 +576,12 @@ class Repository:
             if counter_ids is not None:
                 row.selected_counter_ids = list(dict.fromkeys(int(v) for v in counter_ids))[:20]
             if goal_ids is not None:
-                row.primary_goal_ids = list(dict.fromkeys(str(v) for v in goal_ids))[:10]
+                goals = list(dict.fromkeys(str(v) for v in goal_ids))[:10]
+                changed = goals != list(row.primary_goal_ids or [])
+                row.primary_goal_ids = goals
+                row.goals_source = goals_source
+                if not changed:
+                    goal_ids = None  # same goals: keep the snapshot cache
             if goal_roles is not None:
                 row.goal_roles = goal_roles
             if targets is not None:

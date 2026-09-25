@@ -279,6 +279,11 @@ def install_menu(router, runtime, launch, launch_chart):
                     f"\nДоступно: {available}; без доступа: {forbidden}"
                     f"\nВыбрано: {len(selected)}"
                     f"\nОсновных целей: {len(client.metrica.main_goal_ids)} из 10"
+                    + (
+                        " (автоматически из кампаний; выбор вручную заменит их)"
+                        if client.direct.goals_source == "campaigns"
+                        else ""
+                    )
                 )
             row("🔄 Обновить доступы", "refresh_data", client_id=client_id, page=page)
             row("📟 Выбрать счётчики", "counters", client_id=client_id, page=0)

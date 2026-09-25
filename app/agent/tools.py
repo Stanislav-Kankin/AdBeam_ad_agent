@@ -85,7 +85,7 @@ class ToolRegistry:
             matches = self.checks.registry.resolve(chat_id, args.client_id)
             if len(matches) != 1:
                 raise PermissionError
-            client = matches[0]
+            client = await self.checks.ensure_goals(matches[0])
             if name == "get_campaign_goal_performance":
                 first_day, last_day = args.date_range()
                 return {

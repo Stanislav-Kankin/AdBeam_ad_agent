@@ -14,6 +14,9 @@ class StrictModel(BaseModel):
 class DirectConfig(StrictModel):
     client_login: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9_.@-]+$")
     main_goal_ids: list[GoalId] = Field(default_factory=list, max_length=10)
+    # manual: chosen by a person (YAML or the menu); campaigns: taken automatically
+    # from the goals set inside the campaigns while nobody chose any.
+    goals_source: Literal["manual", "campaigns"] = "manual"
     token_env: str = Field(
         default="DIRECT_OAUTH_TOKEN",
         pattern=r"^(?:DIRECT|ADBEAM)_[A-Z0-9_]*(?:TOKEN|API_KEY)$",

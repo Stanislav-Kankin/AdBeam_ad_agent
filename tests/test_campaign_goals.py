@@ -128,3 +128,58 @@ async def test_gender_of_converters_is_shown_next_to_targeting(runtime, client):
     assert Decimal(men["conversions_share_percent"]) == Decimal("98.00")
     assert Decimal(men["clicks_share_percent"]) < 25
     assert audience["targeting_adjustments"][0]["bid_percent"] == 0
+
+
+def without_goals(runtime, client):
+    bare = client.model_copy(
+        update={
+            "direct": client.direct.model_copy(update={"main_goal_ids": []}),
+            "metrica": client.metrica.model_copy(update={"main_goal_ids": []}),
+        }
+    )
+    runtime.registry.clients[client.id] = bare
+    return bare
+
+
+async def test_card_takes_campaign_goals_when_none_are_chosen(runtime, client):
+    from app.analytics.periods import make_period
+    from app.domain.reports import CheckMode, TriggerSource
+
+    without_goals(runtime, client)
+    reports, text = await runtime.checks.run_check(
+        [client.id],
+        make_period("7d"),
+        CheckMode.STANDARD,
+        TriggerSource.INTERNAL,
+        chat_id=123456789,
+    )
+    stored = runtime.registry.clients[client.id]
+    assert stored.direct.main_goal_ids == ["5001"]  # the blind Master campaign adds none
+    assert stored.direct.goals_source == "campaigns"
+    assert reports[0].main_goal_ids == ["5001"]
+    assert reports[0].current.conversions is not None
+    assert "Цели взяты из настроек кампаний" in text
+    assert "цели не выбраны" not in text.casefold()
+
+    # A restart re-reads the stored profile with the same source.
+    again = await runtime.checks.repository.configure_client(client)
+    assert again.direct.goals_source == "campaigns"
+
+
+async def test_manual_goals_are_never_replaced(runtime, client):
+    spy = AsyncMock(wraps=runtime.checks.provider.campaign_goals)
+    runtime.checks.provider.campaign_goals = spy
+    assert await runtime.checks.ensure_goals(client) is client
+    spy.assert_not_called()
+
+
+async def test_choosing_goals_by_hand_ends_automatic_mode(runtime, client):
+    bare = without_goals(runtime, client)
+    auto = await runtime.checks.ensure_goals(bare)
+    assert auto.direct.goals_source == "campaigns"
+    manual = await runtime.checks.repository.save_client_preferences(
+        auto, goal_ids=["5001", "5003"], user_id=1
+    )
+    assert manual.direct.goals_source == "manual"
+    runtime.checks.goals_checked.clear()
+    assert await runtime.checks.ensure_goals(manual) is manual

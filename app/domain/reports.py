@@ -122,6 +122,7 @@ class ClientReport(BaseModel):
     source_status: dict[str, str] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)
     main_goal_ids: list[str] = Field(default_factory=list)
+    goals_source: Literal["manual", "campaigns"] = "manual"
     targets: dict = Field(default_factory=dict)
     goal_scope: Literal["counter", "direct_campaigns"] = "counter"
     goal_metrics: list[dict] = Field(default_factory=list)
