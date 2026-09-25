@@ -30,22 +30,28 @@ ANALYTICS_WORDS = re.compile(
 ALL_CLIENTS_WORDS = re.compile(r"все\s+клиент|по\s+всем\s+клиент|всех\s+клиент", re.IGNORECASE)
 
 
-async def send_text(bot, chat_id, text, *, markdown=False):
+def topic_of(message):
+    """Forum topic of a group message: replies must stay in it, not in General."""
+    return message.message_thread_id if message and message.is_topic_message else None
+
+
+async def send_text(bot, chat_id, text, *, markdown=False, thread_id=None):
     if markdown:
         for part, entities in markdown_parts(text):
-            await send_part(bot, chat_id, part, entities=entities)
+            await send_part(bot, chat_id, part, entities=entities, thread_id=thread_id)
         return
     for part in split_message(text):
-        await send_part(bot, chat_id, part)
+        await send_part(bot, chat_id, part, thread_id=thread_id)
 
 
-async def send_part(bot, chat_id, text, entities=None):
+async def send_part(bot, chat_id, text, entities=None, thread_id=None):
     return await retry_telegram(
         lambda: bot.send_message(
             chat_id,
             text,
             parse_mode=None,
             entities=report_entities(text) if entities is None else entities,
+            message_thread_id=thread_id,
             request_timeout=15,
         )
     )
@@ -166,9 +172,17 @@ def build_dispatcher(runtime):
             return
         # The campaigns view is Markdown (bold names); the technical view is plain text.
         if view == "specialist":
-            await send_text(callback.message.bot, chat_id, specialist, markdown=True)
+            await send_text(
+                callback.message.bot,
+                chat_id,
+                specialist,
+                markdown=True,
+                thread_id=topic_of(callback.message),
+            )
         else:
-            await send_text(callback.message.bot, chat_id, technical)
+            await send_text(
+                callback.message.bot, chat_id, technical, thread_id=topic_of(callback.message)
+            )
 
     def client_label(client):
         name = client.name.strip()
@@ -208,6 +222,7 @@ def build_dispatcher(runtime):
                 message.chat.id,
                 BufferedInputFile(image, filename="adbeam-dynamics.png"),
                 caption=caption,
+                message_thread_id=topic_of(message),
                 request_timeout=30,
             )
         )

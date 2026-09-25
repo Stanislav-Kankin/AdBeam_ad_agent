@@ -240,6 +240,55 @@ async def test_campaigns_view_renders_markdown_not_asterisks(runtime):
     assert all("**" not in text for text in texts)
 
 
+async def test_group_topic_buttons_reply_in_the_same_topic(runtime):
+    from aiogram.types import CallbackQuery
+
+    group, topic = -100777, 42
+    runtime.settings.telegram_allowed_chat_ids.append(group)
+    runtime.registry.base_allowed_chats = runtime.registry.base_allowed_chats | {group}
+    for client in runtime.registry.clients.values():
+        client.telegram.allowed_chat_ids.append(group)
+
+    def topic_message(text, message_id):
+        return Message(
+            message_id=message_id,
+            date=datetime.now(UTC),
+            chat=Chat(id=group, type="supergroup", is_forum=True),
+            from_user=User(id=1, is_bot=False, first_name="User"),
+            message_thread_id=topic,
+            is_topic_message=True,
+            text=text,
+        )
+
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+        await dp.feed_update(
+            bot, Update(update_id=1, message=topic_message('/check "West Экспорт" 7d', 1))
+        )
+        await runtime.jobs.close()
+        offer = next(
+            item
+            for item in session.sent
+            if isinstance(item, SendMessage) and item.text == "Дополнительные данные"
+        )
+        before = len(session.sent)
+        callback = CallbackQuery(
+            id="campaigns",
+            from_user=User(id=1, is_bot=False, first_name="User"),
+            chat_instance="test",
+            message=topic_message("Дополнительные данные", 99),
+            data=offer.reply_markup.inline_keyboard[0][0].callback_data,
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=callback))
+
+    replies = [item for item in session.sent[before:] if isinstance(item, SendMessage)]
+    assert replies and all(int(item.chat_id) == group for item in replies)
+    assert all(item.message_thread_id == topic for item in replies)
+    photos = [item for item in session.sent if isinstance(item, SendPhoto)]
+    assert all(item.message_thread_id == topic for item in photos)
+
+
 async def test_unknown_chats_silent(runtime):
     session = FakeTelegram()
     async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
