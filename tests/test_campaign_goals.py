@@ -258,3 +258,26 @@ async def test_campaign_list_falls_back_to_v5(client, monkeypatch):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         assert await DirectAdapter(ReadTransport(http)).campaigns(client) == []
     assert seen == ["/json/v501/campaigns", "/json/v5/campaigns"]
+
+
+async def test_hidden_master_campaigns_do_not_mean_no_active_campaigns(
+    runtime, client, monkeypatch
+):
+    # Barka case: the only listed campaign is off, but a Master campaign that
+    # Campaigns.get never returns keeps spending.
+    from app.analytics.periods import make_period
+    from app.domain.reports import CheckMode
+
+    period = make_period("7d")
+    current, previous = await runtime.checks.snapshots(client, period)
+    current.direct.campaigns = [{**current.direct.campaigns[0], "State": "OFF"}]
+
+    async def snapshots(*args, **kwargs):
+        return current, previous
+
+    monkeypatch.setattr(runtime.checks, "snapshots", snapshots)
+    report = await runtime.checks.analyze(client, period, CheckMode.STANDARD)
+    types = {s.type for s in report.signals}
+    assert "no_active_campaigns" not in types
+    hidden = next(s for s in report.signals if s.type == "hidden_campaigns")
+    assert hidden.actual["campaign_ids"] == ["102"]

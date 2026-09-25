@@ -5,7 +5,7 @@ from app.analytics.periods import today_moscow
 from app.domain.reports import DataStatus, Metrics, Signal, Snapshot
 
 # Always context: current campaign states do not explain a past period by themselves.
-CONTEXT_SIGNALS = frozenset({"campaign_states"})
+CONTEXT_SIGNALS = frozenset({"campaign_states", "hidden_campaigns"})
 # Context only while the main KPI is stable: volume and funnel shifts that did not
 # move the project KPI are worth showing but not worth an alert.
 VOLUME_SIGNALS = frozenset({"spend_change", "cpc_change", "cr_drop", "device_cr_drop"})
@@ -314,7 +314,21 @@ def evaluate(
             or c.get("StatusPayment") == "DISALLOWED"
         ]
         active = [c for c in campaigns if c.get("State") == "ON"]
-        if not active:
+        # Master campaigns spend in Reports but Campaigns.get never returns them, so
+        # their state is unknown: never claim "no active campaigns" because of them.
+        listed = {str(c["Id"]) for c in campaigns}
+        hidden = [r for r in snapshot.direct.rows if r.id not in listed and r.totals.spend]
+        if hidden:
+            add(
+                "hidden_campaigns",
+                "yellow",
+                f"Статусы {len(hidden)} кампаний с расходом API Директа не отдаёт "
+                "(так бывает с Мастером кампаний); по статистике они откручивались.",
+                {"campaign_ids": [r.id for r in hidden][:20], "count": len(hidden)},
+                "Кампании есть в Direct Reports, но отсутствуют в Campaigns.get.",
+                "Статус таких кампаний проверять в интерфейсе Директа.",
+            )
+        if not active and not hidden:
             add(
                 "no_active_campaigns",
                 "yellow",
