@@ -235,6 +235,41 @@ async def test_metrica_report_ignores_legacy_cache_after_schema_change(
     assert "legacy" not in report["limitations"]
 
 
+async def test_metrica_campaign_report_sorts_numbers_and_survives_stopped_campaigns(
+    runtime, client, monkeypatch
+):
+    # Barka case: a campaign present only in the previous period has neither current
+    # spend nor visits; mixing its 0 key with string amounts raised TypeError.
+    from unittest.mock import AsyncMock
+
+    from app.domain.reports import BreakdownRow, Totals
+
+    period = make_period("7d")
+    current, previous = await runtime.checks.snapshots(client, period)
+    current.direct.rows = [
+        BreakdownRow(id="1", name="Малая", totals=Totals(spend=9000, clicks=10)),
+        BreakdownRow(id="2", name="Большая", totals=Totals(spend=10000, clicks=10)),
+    ]
+    previous.direct.rows = [
+        *current.direct.rows,
+        BreakdownRow(id="3", name="Остановлена", totals=Totals(spend=500, clicks=5)),
+    ]
+
+    async def snapshots(*args, **kwargs):
+        return current, previous
+
+    async def empty(_client, date_range, report_type, **kwargs):
+        return {"status": "ok", "rows": [], "limitations": [], "total_rows": 0}
+
+    monkeypatch.setattr(runtime.checks, "snapshots", snapshots)
+    monkeypatch.setattr(
+        runtime.checks.provider, "metrica_direct_report", AsyncMock(side_effect=empty)
+    )
+    report = await runtime.checks.metrica_report(client, period, "campaign")
+    names = [row["dimensions"][0]["name"] for row in report["rows"]]
+    assert names == ["Большая", "Малая", "Остановлена"]
+
+
 async def test_metrica_campaign_report_keeps_direct_campaign_without_visits(
     runtime, client, monkeypatch
 ):

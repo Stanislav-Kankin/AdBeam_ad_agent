@@ -53,6 +53,12 @@ def snapshot_metrics(snapshot, *, healthy=True):
     return metrics
 
 
+def amount(value) -> Decimal:
+    """Numeric sort key. JSON payloads carry Decimals as strings, so comparing them
+    directly sorted "9000" above "10000" and failed with TypeError against a 0."""
+    return Decimal(str(value)) if value not in (None, "") else Decimal(0)
+
+
 def drivers(current, previous):
     if current.status != DataStatus.OK or previous.status != DataStatus.OK:
         return []
@@ -418,13 +424,13 @@ class CheckService:
                     },
                 }
             rows.sort(
-                key=lambda row: (
-                    row["direct"]["current"].get("spend") or row["current"].get("visits") or 0
+                key=lambda row: amount(
+                    row["direct"]["current"].get("spend") or row["current"].get("visits")
                 ),
                 reverse=True,
             )
         else:
-            rows.sort(key=lambda row: row["current"].get("visits") or 0, reverse=True)
+            rows.sort(key=lambda row: amount(row["current"].get("visits")), reverse=True)
         return {
             "status": current.get("status", "unavailable"),
             "report": report_type,
