@@ -55,17 +55,72 @@ def test_every_agent_tool_has_a_valid_schema():
     assert tools and all(t["input_schema"]["type"] == "object" for t in tools)
 
 
+def reply(*content, stop="end_turn"):
+    usage = SimpleNamespace(
+        input_tokens=100, output_tokens=20, cache_read_input_tokens=0, cache_creation_input_tokens=0
+    )
+    return SimpleNamespace(content=list(content), stop_reason=stop, usage=usage)
+
+
+def provider_with(create):
+    settings = SimpleNamespace(
+        anthropic_api_key=SecretStr("sk-ant-test-not-real"), anthropic_model="claude-sonnet-5"
+    )
+    provider = ClaudeProvider(settings)
+    provider.client.messages.create = create
+    return provider
+
+
+async def test_thinking_is_off_and_whole_dialogue_is_cached():
+    create = AsyncMock(return_value=reply(SimpleNamespace(type="text", text="Готово.")))
+    provider = provider_with(create)
+    await provider.complete(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}], tool_schemas()
+    )
+    kwargs = create.await_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert kwargs["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    await provider.close()
+
+
+async def test_model_without_disabled_thinking_still_answers():
+    import httpx
+    from anthropic import BadRequestError
+
+    error = BadRequestError(
+        "thinking: disabled is not supported",
+        response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+        body=None,
+    )
+    create = AsyncMock(side_effect=[error, reply(SimpleNamespace(type="text", text="Ок."))])
+    provider = provider_with(create)
+    result = await provider.complete([{"role": "user", "content": "q"}], tool_schemas())
+    assert result.content == "Ок." and "thinking" not in create.await_args.kwargs
+    assert provider.thinking is None
+    await provider.close()
+
+
+async def test_cut_answer_says_so():
+    create = AsyncMock(
+        return_value=reply(
+            SimpleNamespace(type="text", text="Цель по набору вод"), stop="max_tokens"
+        )
+    )
+    provider = provider_with(create)
+    result = await provider.complete([{"role": "user", "content": "q"}], tool_schemas())
+    assert result.content.endswith("уточните вопрос.")
+    await provider.close()
+
+
 async def test_answer_blocks_become_llm_message():
     settings = SimpleNamespace(
         anthropic_api_key=SecretStr("sk-ant-test-not-real"), anthropic_model="claude-sonnet-5"
     )
     provider = ClaudeProvider(settings)
     provider.client.messages.create = AsyncMock(
-        return_value=SimpleNamespace(
-            content=[
-                SimpleNamespace(type="text", text="Проверяю."),
-                SimpleNamespace(type="tool_use", id="u1", name="list_clients", input={"top_n": 5}),
-            ]
+        return_value=reply(
+            SimpleNamespace(type="text", text="Проверяю."),
+            SimpleNamespace(type="tool_use", id="u1", name="list_clients", input={"top_n": 5}),
         )
     )
     result = await provider.complete(

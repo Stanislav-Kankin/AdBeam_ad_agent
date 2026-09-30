@@ -6,10 +6,13 @@ tool_result blocks inside user turns) and converts the answer back.
 """
 
 import json
+import logging
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, BadRequestError
 
 from app.integrations.deepseek import LLMMessage, ToolCall
+
+logger = logging.getLogger(__name__)
 
 
 def to_anthropic(messages):
@@ -82,19 +85,52 @@ class ClaudeProvider:
             api_key=settings.anthropic_api_key.get_secret_value(), timeout=60, max_retries=1
         )
         self.model = settings.anthropic_model
+        # Hidden reasoning shares max_tokens with the answer and cut replies mid-word;
+        # the backend computes every number, so the model does not need it.
+        self.thinking = {"type": "disabled"}
 
     async def complete(self, messages, tools):
         system, turns = to_anthropic(messages)
-        result = await self.client.messages.create(
-            model=self.model,
-            max_tokens=2500,
-            # The system prompt and tool list repeat on every call: cache them.
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            tools=to_tools(tools),
-            messages=turns,
+        if turns:
+            # Each agent step resends the whole dialogue: cache it up to the newest
+            # block, so the next step pays a tenth for everything before it.
+            turns[-1]["content"][-1] = {
+                **turns[-1]["content"][-1],
+                "cache_control": {"type": "ephemeral"},
+            }
+        request = {
+            "model": self.model,
+            "max_tokens": 4000,
+            # The tool list and system prompt repeat on every call: cache them too.
+            "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            "tools": to_tools(tools),
+            "messages": turns,
+        }
+        try:
+            result = await self.client.messages.create(
+                **request, **({"thinking": self.thinking} if self.thinking else {})
+            )
+        except BadRequestError as exc:
+            if not self.thinking or "thinking" not in str(exc).lower():
+                raise
+            logger.warning("Model does not accept disabled thinking; retrying without it")
+            self.thinking = None
+            result = await self.client.messages.create(**request)
+        usage = result.usage
+        logger.info(
+            "Claude usage model=%s stop=%s input=%s cache_read=%s cache_write=%s output=%s",
+            self.model,
+            result.stop_reason,
+            usage.input_tokens,
+            getattr(usage, "cache_read_input_tokens", None),
+            getattr(usage, "cache_creation_input_tokens", None),
+            usage.output_tokens,
         )
+        text = "".join(block.text for block in result.content if block.type == "text")
+        if result.stop_reason == "max_tokens" and text:
+            text = text.rstrip() + "…\n\nОтвет не поместился целиком — уточните вопрос."
         return LLMMessage(
-            content="".join(block.text for block in result.content if block.type == "text"),
+            content=text,
             calls=[
                 ToolCall(block.id, block.name, json.dumps(block.input, ensure_ascii=False))
                 for block in result.content

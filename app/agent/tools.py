@@ -299,7 +299,8 @@ class ToolRegistry:
         result = safe_json(await self.execute(*args, **kwargs))
         # Bound valid structured JSON, never cut serialized JSON halfway through a field.
         for _ in range(12):
-            if len(json.dumps(result, ensure_ascii=False)) <= 40000:
+            # Every tool result is resent on each later agent step, so keep it compact.
+            if len(json.dumps(result, ensure_ascii=False)) <= 20000:
                 return result
 
             def shrink(value):
