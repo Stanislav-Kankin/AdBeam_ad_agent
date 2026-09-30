@@ -66,6 +66,8 @@ def build_runtime(settings):
         llm = DeepSeekProvider(settings)
     else:
         llm = OfflineDemoProvider() if settings.app_mode == "mock" else None
+    if llm is not None and hasattr(llm, "usage_sink"):
+        llm.usage_sink = repo.record_llm_usage
     runtime = Runtime(
         settings,
         registry,

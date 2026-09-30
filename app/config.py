@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -34,6 +35,16 @@ class Settings(BaseSettings):
     llm_provider: Literal["deepseek", "anthropic"] = "deepseek"
     anthropic_api_key: SecretStr = SecretStr("")
     anthropic_model: str = "claude-sonnet-5"
+    # USD per million tokens, used only for the /balance estimate.
+    anthropic_price_input: float = Field(default=3.0, ge=0)
+    anthropic_price_cache_write: float = Field(default=3.75, ge=0)
+    anthropic_price_cache_read: float = Field(default=0.30, ge=0)
+    anthropic_price_output: float = Field(default=15.0, ge=0)
+    deepseek_price_input: float = Field(default=0.0, ge=0)
+    deepseek_price_output: float = Field(default=0.0, ge=0)
+    # Amount put on the API account and when: /balance shows what is left of it.
+    llm_budget_usd: float | None = Field(default=None, ge=0)
+    llm_budget_since: date | None = None
     http_timeout_seconds: float = Field(default=30, gt=0, le=120)
     http_retries: int = Field(default=4, ge=0, le=8)
     max_background_jobs: int = Field(default=4, ge=1, le=16)

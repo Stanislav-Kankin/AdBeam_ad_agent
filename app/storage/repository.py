@@ -16,6 +16,7 @@ from app.storage.models import (
     DailySnapshot,
     Delivery,
     DirectDimensionPage,
+    LlmUsage,
     MetricaCounterCatalog,
     Run,
     SnapshotCache,
@@ -103,6 +104,42 @@ class Repository:
                     )
                 )
                 return True
+
+    async def record_llm_usage(self, provider, model, tokens, cost_usd):
+        async with self.write_session() as session:
+            session.add(
+                LlmUsage(
+                    app_mode=self.app_mode,
+                    provider=provider,
+                    model=model[:60],
+                    input_tokens=tokens.get("input", 0),
+                    cache_read_tokens=tokens.get("cache_read", 0),
+                    cache_write_tokens=tokens.get("cache_write", 0),
+                    output_tokens=tokens.get("output", 0),
+                    cost_usd=cost_usd,
+                )
+            )
+
+    async def llm_spend(self, since):
+        async with self.sessions() as session:
+            row = (
+                await session.execute(
+                    select(
+                        func.count(LlmUsage.id),
+                        func.coalesce(func.sum(LlmUsage.cost_usd), 0.0),
+                        func.coalesce(
+                            func.sum(
+                                LlmUsage.input_tokens
+                                + LlmUsage.cache_read_tokens
+                                + LlmUsage.cache_write_tokens
+                            ),
+                            0,
+                        ),
+                        func.coalesce(func.sum(LlmUsage.output_tokens), 0),
+                    ).where(LlmUsage.app_mode == self.app_mode, LlmUsage.created_at >= since)
+                )
+            ).one()
+        return {"calls": row[0], "cost_usd": float(row[1]), "input": row[2], "output": row[3]}
 
     async def purge(self, days=90):
         cutoff = datetime.now(UTC) - timedelta(days=days)

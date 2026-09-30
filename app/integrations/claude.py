@@ -85,6 +85,13 @@ class ClaudeProvider:
             api_key=settings.anthropic_api_key.get_secret_value(), timeout=60, max_retries=1
         )
         self.model = settings.anthropic_model
+        self.prices = (
+            settings.anthropic_price_input,
+            settings.anthropic_price_cache_write,
+            settings.anthropic_price_cache_read,
+            settings.anthropic_price_output,
+        )
+        self.usage_sink = None
         # Hidden reasoning shares max_tokens with the answer and cut replies mid-word;
         # the backend computes every number, so the model does not need it.
         self.thinking = {"type": "disabled"}
@@ -126,6 +133,24 @@ class ClaudeProvider:
             getattr(usage, "cache_creation_input_tokens", None),
             usage.output_tokens,
         )
+        tokens = {
+            "input": usage.input_tokens or 0,
+            "cache_write": getattr(usage, "cache_creation_input_tokens", None) or 0,
+            "cache_read": getattr(usage, "cache_read_input_tokens", None) or 0,
+            "output": usage.output_tokens or 0,
+        }
+        if self.usage_sink:
+            price_in, price_write, price_read, price_out = self.prices
+            cost = (
+                tokens["input"] * price_in
+                + tokens["cache_write"] * price_write
+                + tokens["cache_read"] * price_read
+                + tokens["output"] * price_out
+            ) / 1_000_000
+            try:
+                await self.usage_sink("anthropic", self.model, tokens, cost)
+            except Exception:
+                logger.exception("Could not record model usage")
         text = "".join(block.text for block in result.content if block.type == "text")
         if result.stop_reason == "max_tokens" and text:
             text = text.rstrip() + "…\n\nОтвет не поместился целиком — уточните вопрос."

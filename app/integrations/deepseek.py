@@ -45,6 +45,8 @@ class DeepSeekProvider:
             max_retries=1,
         )
         self.model = settings.deepseek_model
+        self.prices = (settings.deepseek_price_input, settings.deepseek_price_output)
+        self.usage_sink = None
 
     async def complete(self, messages, tools):
         result = await self.client.chat.completions.create(
@@ -56,6 +58,17 @@ class DeepSeekProvider:
             extra_body={"thinking": {"type": "disabled"}},
         )
         msg = result.choices[0].message
+        usage = getattr(result, "usage", None)
+        if self.usage_sink and usage is not None:
+            tokens = {
+                "input": usage.prompt_tokens or 0,
+                "output": usage.completion_tokens or 0,
+            }
+            cost = (tokens["input"] * self.prices[0] + tokens["output"] * self.prices[1]) / 1e6
+            try:
+                await self.usage_sink("deepseek", self.model, tokens, cost)
+            except Exception:
+                pass
         return LLMMessage(
             content=msg.content or "",
             calls=[

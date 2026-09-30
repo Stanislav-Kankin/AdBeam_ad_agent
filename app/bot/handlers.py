@@ -17,6 +17,7 @@ from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities, retry_telegram
 from app.domain.reports import CheckMode, ClientReport, TriggerSource
+from app.reporting.balance import balance_text
 from app.reporting.charts import render_dynamics
 from app.reporting.formatter import audience_report, campaigns_view, detailed, split_message
 
@@ -419,6 +420,11 @@ def build_dispatcher(runtime):
             await message.answer(
                 "Выбор отменён, контекст диалога очищен. Уже запущенные проверки продолжатся."
             )
+        elif name == "balance":
+            if message.from_user.id not in runtime.settings.telegram_admin_user_ids:
+                await message.answer("Команда доступна пользователям из TELEGRAM_ADMIN_USER_IDS.")
+                return
+            await message.answer(await balance_text(runtime), parse_mode=None)
         elif name == "schedule":
             if message.from_user.id not in runtime.settings.telegram_admin_user_ids:
                 await message.answer("Команда доступна пользователям из TELEGRAM_ADMIN_USER_IDS.")

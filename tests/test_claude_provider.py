@@ -7,6 +7,15 @@ from pydantic import SecretStr
 from app.agent.tools import tool_schemas
 from app.integrations.claude import ClaudeProvider, to_anthropic, to_tools
 
+SETTINGS = {
+    "anthropic_api_key": SecretStr("sk-ant-test-not-real"),
+    "anthropic_model": "claude-sonnet-5",
+    "anthropic_price_input": 3.0,
+    "anthropic_price_cache_write": 3.75,
+    "anthropic_price_cache_read": 0.30,
+    "anthropic_price_output": 15.0,
+}
+
 
 def test_dialogue_converts_to_messages_api():
     system, turns = to_anthropic(
@@ -63,9 +72,7 @@ def reply(*content, stop="end_turn"):
 
 
 def provider_with(create):
-    settings = SimpleNamespace(
-        anthropic_api_key=SecretStr("sk-ant-test-not-real"), anthropic_model="claude-sonnet-5"
-    )
+    settings = SimpleNamespace(**SETTINGS)
     provider = ClaudeProvider(settings)
     provider.client.messages.create = create
     return provider
@@ -113,9 +120,7 @@ async def test_cut_answer_says_so():
 
 
 async def test_answer_blocks_become_llm_message():
-    settings = SimpleNamespace(
-        anthropic_api_key=SecretStr("sk-ant-test-not-real"), anthropic_model="claude-sonnet-5"
-    )
+    settings = SimpleNamespace(**SETTINGS)
     provider = ClaudeProvider(settings)
     provider.client.messages.create = AsyncMock(
         return_value=reply(
@@ -159,3 +164,32 @@ async def test_env_switch_selects_claude_and_falls_back_to_deepseek(settings):
     )
     assert isinstance(fallback.agent.llm, DeepSeekProvider)
     await fallback.close()
+
+
+async def test_every_call_is_recorded_and_balance_shows_the_remainder(runtime):
+    from datetime import UTC, date, datetime
+
+    from app.reporting.balance import balance_text
+
+    create = AsyncMock(return_value=reply(SimpleNamespace(type="text", text="Ок.")))
+    settings = SimpleNamespace(**SETTINGS)
+    provider = ClaudeProvider(settings)
+    provider.client.messages.create = create
+    provider.usage_sink = runtime.checks.repository.record_llm_usage
+    create.return_value.usage = SimpleNamespace(
+        input_tokens=2,
+        cache_creation_input_tokens=14954,
+        cache_read_input_tokens=0,
+        output_tokens=95,
+    )
+    await provider.complete([{"role": "user", "content": "q"}], tool_schemas())
+    await provider.close()
+
+    spend = await runtime.checks.repository.llm_spend(datetime(2000, 1, 1, tzinfo=UTC))
+    assert spend["calls"] == 1
+    assert abs(spend["cost_usd"] - 0.0575) < 0.001  # 14 954 cache writes + 95 output
+
+    runtime.settings.llm_budget_usd = 5.0
+    runtime.settings.llm_budget_since = date(2026, 1, 1)
+    text = await balance_text(runtime)
+    assert "обращений 1" in text and "Остаток по расчёту бота: $4,94" in text

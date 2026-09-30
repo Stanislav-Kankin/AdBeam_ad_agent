@@ -58,6 +58,20 @@ class ToolEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class LlmUsage(Base):
+    __tablename__ = "llm_usage"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    app_mode: Mapped[str] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    model: Mapped[str] = mapped_column(String(60))
+    input_tokens: Mapped[int] = mapped_column(Integer)
+    cache_read_tokens: Mapped[int] = mapped_column(Integer)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer)
+    output_tokens: Mapped[int] = mapped_column(Integer)
+    cost_usd: Mapped[float] = mapped_column(Float)
+
+
 class Delivery(Base):
     __tablename__ = "deliveries"
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
