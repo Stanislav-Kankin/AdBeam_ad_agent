@@ -88,73 +88,135 @@ def percent_text(value):
     value = Decimal(value)
     if abs(value) < 3:
         return "стабильно"
-    return f"{'+' if value > 0 else '−'}{abs(value):.0f}%".replace(".", ",")
+    return f"{'+' if value > 0 else '−'}{abs(value):.0f}%"
+
+
+def num(value, digits=1):
+    return f"{Decimal(value):.{digits}f}".replace(".", ",")
+
+
+def minutes(seconds):
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
+def mean(items, field):
+    values = [Decimal(str(i[field])) for i in items if i.get(field) is not None]
+    return sum(values) / len(values) if values else None
+
+
+def quality_periods(trend):
+    """Ad-traffic quality of the last 4 weeks and the 4 before (None without Metrica)."""
+    quality = trend.get("quality")
+    if not quality:
+        return None
+    ordered = [quality[k] for k in sorted(quality)]
+    now, was = ordered[-4:], ordered[-8:-4]
+    return {
+        field: (mean(now, field), mean(was, field))
+        for field in ("bounce_rate", "page_depth", "duration")
+    }
 
 
 def summary(trend):
-    """Plain reading of the half-year: last 4 weeks vs the 4 before, the trend from the
-    first to the last two months, the best week, and ad-traffic quality."""
+    """Manager-readable half-year: last 4 weeks vs the 4 before, the trend from the
+    first to the last two months, the best week, ad-traffic quality and a plain
+    reading. Markdown: bold labels and bullets."""
     weeks = trend["weeks"]
     recent = calculate(aggregate([w["totals"] for w in weeks[-4:]]))
     before = calculate(aggregate([w["totals"] for w in weeks[-8:-4]]))
+    spend_shift = change(recent.spend, before.spend)["percent"]
+    conv_shift = change(recent.conversions, before.conversions)["percent"]
+    cpa_shift = change(recent.cpa, before.cpa)["percent"]
     lines = [
-        f"Тренд за полгода · {trend['start']:%d.%m.%Y}–{trend['end']:%d.%m.%Y}, по неделям",
+        f"📊 **Тренд за полгода** · {trend['start']:%d.%m}–{trend['end']:%d.%m.%Y}, полные недели",
         "",
-        "Последние 4 недели к предыдущим 4: "
-        f"расход {percent_text(change(recent.spend, before.spend)['percent'])}, "
-        f"конверсии {percent_text(change(recent.conversions, before.conversions)['percent'])}, "
-        f"CPA {percent_text(change(recent.cpa, before.cpa)['percent'])}.",
+        "**Последние 4 недели к предыдущим 4**",
+        f"• Расход: **{percent_text(spend_shift)}**",
+        f"• Конверсии: **{percent_text(conv_shift)}**",
+        f"• CPA: **{percent_text(cpa_shift)}**"
+        + (
+            " — дешевле"
+            if cpa_shift is not None and cpa_shift <= -3
+            else " — дороже"
+            if cpa_shift is not None and cpa_shift >= 3
+            else ""
+        ),
     ]
     key = "conversions" if any(w["totals"].conversions for w in weeks) else "spend"
+    label = "конверсии" if key == "conversions" else "расход"
     early = calculate(aggregate([w["totals"] for w in weeks[:8]]))
     late = calculate(aggregate([w["totals"] for w in weeks[-8:]]))
     shift = change(getattr(late, key), getattr(early, key))["percent"]
-    label = "конверсии" if key == "conversions" else "расход"
     if shift is None:
-        direction = "не с чем сравнить начало периода"
+        direction = "сравнить с началом периода не с чем"
     elif shift >= 10:
-        direction = f"рост: {label} {percent_text(shift)} к началу полугодия"
+        direction = f"**рост**: {label} {percent_text(shift)} к началу полугодия"
     elif shift <= -10:
-        direction = f"спад: {label} {percent_text(shift)} к началу полугодия"
+        direction = f"**спад**: {label} {percent_text(shift)} к началу полугодия"
     else:
-        direction = f"{label} на уровне начала полугодия"
-    lines.append(f"За полгода — {direction}.")
+        direction = f"{label} **на уровне** начала полугодия"
+    lines += ["", "**За полгода**", f"• {direction[0].upper() + direction[1:]}"]
     best = max(weeks, key=lambda w: getattr(w["totals"], key) or 0)
-    if getattr(best["totals"], key):
-        lines.append(f"Лучшая неделя по показателю «{label}»: с {best['start']:%d.%m}.")
-    quality = trend.get("quality")
-    if quality:
-        ordered = [quality[k] for k in sorted(quality)]
+    best_value = getattr(best["totals"], key)
+    if best_value:
+        amount = f"{int(best_value)}" if key == "conversions" else f"{int(best_value):,} ₽"
+        lines.append(
+            f"• Лучшая неделя: с **{best['start']:%d.%m}** — {amount.replace(',', ' ')}"
+            + (" конверсий" if key == "conversions" else "")
+        )
 
-        def mean(items, field):
-            values = [Decimal(str(i[field])) for i in items if i.get(field) is not None]
-            return sum(values) / len(values) if values else None
-
-        now, was = ordered[-4:], ordered[-8:-4]
-        bounce_now, bounce_was = mean(now, "bounce_rate"), mean(was, "bounce_rate")
-        depth_now, depth_was = mean(now, "page_depth"), mean(was, "page_depth")
-        time_now, time_was = mean(now, "duration"), mean(was, "duration")
-        if bounce_now is not None:
-            text = f"Качество рекламного трафика (Метрика): отказы {bounce_now:.1f}%".replace(
-                ".", ","
-            )
-            if bounce_was is not None:
-                text += f" (было {bounce_was:.1f}%)".replace(".", ",")
-            if depth_now is not None:
-                text += f", глубина {depth_now:.1f} стр.".replace(".", ",")
-                if depth_was is not None:
-                    text += f" (было {depth_was:.1f})".replace(".", ",")
-            if time_now is not None:
-                text += f", время на сайте {int(time_now) // 60}:{int(time_now) % 60:02d}"
-                if time_was is not None:
-                    text += f" (было {int(time_was) // 60}:{int(time_was) % 60:02d})"
-            lines.append(text + ".")
+    quality = quality_periods(trend)
+    notes = []
+    if quality and quality["bounce_rate"][0] is not None:
+        lines += ["", "**Качество рекламного трафика** · Метрика, 4 недели к предыдущим 4"]
+        bounce_now, bounce_was = quality["bounce_rate"]
+        text = f"• Отказы: **{num(bounce_now)}%**"
+        if bounce_was is not None:
+            delta = bounce_now - bounce_was
+            text += f" (было {num(bounce_was)}%)"
+            if abs(delta) >= 1:
+                text += f" — {'выше' if delta > 0 else 'ниже'} на {num(abs(delta))} п.п."
+                if delta >= 2:
+                    notes.append("больше отказов")
+        lines.append(text)
+        for field, title, render, unit in (
+            ("page_depth", "Глубина", num, " стр."),
+            ("duration", "Время на сайте", minutes, ""),
+        ):
+            now, was = quality[field]
+            if now is None:
+                continue
+            text = f"• {title}: **{render(now)}{unit}**"
+            if was:
+                delta = (now - was) / was * 100
+                text += f" (было {render(was)}{unit})"
+                if abs(delta) >= 5:
+                    text += f" — {'больше' if delta > 0 else 'меньше'} на {abs(delta):.0f}%"
+                    if delta <= -10:
+                        notes.append(
+                            "меньше " + ("страниц" if field == "page_depth" else "времени")
+                        )
+            lines.append(text)
     else:
-        lines.append("Качество трафика не показано: нет доступа к счётчику Метрики.")
+        lines += ["", "Качество трафика не показано: Метрика по этому счётчику недоступна."]
+
+    reading = []
+    if conv_shift is not None and cpa_shift is not None:
+        if conv_shift >= 3 and cpa_shift <= -3:
+            reading.append("Конверсий больше, и они дешевле — тренд хороший.")
+        elif conv_shift <= -3 and cpa_shift >= 3:
+            reading.append("Конверсий меньше, и они дороже — стоит разобрать с техспецом.")
+        elif conv_shift <= -3:
+            reading.append("Конверсии снижаются — спросите бота, какие кампании дали спад.")
+    if notes:
+        reading.append(
+            "Посетители из рекламы вовлечены слабее ("
+            + ", ".join(notes)
+            + "): уточните у техспеца новые площадки, аудитории или посадочные."
+        )
+    if reading:
+        lines += ["", "**Что это значит**", *[f"• {item}" for item in reading]]
     if trend.get("limited"):
         lines.append("Часть недель Директ отдал не полностью.")
-    lines += [
-        "",
-        "Если что-то настораживает, спросите бота: «почему упали конверсии в последний месяц?»",
-    ]
+    lines += ["", "Спросите бота, если что-то настораживает: «почему выросли отказы в сентябре?»"]
     return "\n".join(lines)

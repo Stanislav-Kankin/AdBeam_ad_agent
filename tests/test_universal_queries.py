@@ -137,3 +137,11 @@ async def test_metrica_400_message_is_kept_and_bounded(client, monkeypatch):
                 limit=5,
             )
     assert caught.value.detail.startswith("Wrong x") and len(caught.value.detail) <= 300
+
+
+async def test_trend_tool_gives_the_agent_the_chart_numbers(runtime):
+    result = await call(runtime, "get_half_year_trend", {"client_id": "west_export"})
+    assert not result.get("error")
+    assert len(result["weeks"]) == 26
+    assert {"spend", "conversions", "cpa", "week_start"} <= result["weeks"][0].keys()
+    assert "**Последние 4 недели к предыдущим 4**" in result["reading"]

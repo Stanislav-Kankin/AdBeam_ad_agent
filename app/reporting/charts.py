@@ -246,7 +246,7 @@ def render_dynamics(client_name, period, current: DirectData, previous: DirectDa
 
 def render_trend(client_name, trend) -> bytes:
     """Half-year by complete weeks: spend, conversions, CPA and ad-traffic bounce rate."""
-    image = Image.new("RGB", (WIDTH, HEIGHT), "#F1F5F9")
+    image = Image.new("RGB", (WIDTH, 1460), "#F1F5F9")
     draw = ImageDraw.Draw(image)
     draw.text((65, 45), client_name, font=_font(42, bold=True), fill=INK)
     draw.text(
@@ -315,8 +315,28 @@ def render_trend(client_name, trend) -> bytes:
         dates,
         x_label="Недели",
     )
+    duration = [(quality.get(str(day)) or {}).get("duration") for day in dates]
+    depth = [(quality.get(str(day)) or {}).get("page_depth") for day in dates]
+    _panel(
+        draw,
+        (65, 1040, 790, 1370),
+        "Время на сайте, сек." if quality else "Время на сайте: нет данных Метрики",
+        [Decimal(str(v)) if v is not None else None for v in duration],
+        [],
+        dates,
+        x_label="Недели",
+    )
+    _panel(
+        draw,
+        (815, 1040, 1535, 1370),
+        "Глубина просмотра, стр." if quality else "Глубина: нет данных Метрики",
+        [Decimal(str(v)) if v is not None else None for v in depth],
+        [],
+        dates,
+        x_label="Недели",
+    )
     draw.text(
-        (65, 1040),
+        (65, 1400),
         "Полные недели пн–вс. Карточки: последние 4 недели к предыдущим 4. Источники: Директ, Метрика.",
         font=_font(19),
         fill=MUTED,

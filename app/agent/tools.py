@@ -16,6 +16,7 @@ from app.analytics import queries
 from app.analytics.diagnostics import drivers, snapshot_metrics
 from app.analytics.metrics import calculate, compare
 from app.analytics.rules import tracking_health
+from app.analytics.trend import load_trend, quality_periods, summary
 from app.domain.reports import CheckMode, TriggerSource
 from app.storage.repository import safe_json
 
@@ -31,6 +32,7 @@ DESCRIPTIONS = {
     "get_audience_breakdown": "Возраст, пол и уровень дохода рекламного трафика Директа; долгосрочные интересы аудитории сайта из Метрики.",
     "get_metrica_direct_report": "Отчёт Метрики по кампаниям Директа и выбранным целям: кампании, объявления, условия показа, поисковые фразы или площадки; включает поведение и сравнение периодов.",
     "get_campaign_goal_performance": "Кампании по целям, заданным в их настройках (ключевые цели и цель стратегии): конверсии, CPA и лучшая кампания по каждой цели. Не требует основных целей и Метрики; период до 366 дней без сравнения.",
+    "get_half_year_trend": "Тренд за полгода по полным неделям: расход, конверсии по основным целям и CPA из Директа, отказы/глубина/время на сайте рекламного трафика из Метрики, готовый вывод. Те же числа, что в кнопке «Тренд за полгода». Вызывай первым на вопросы о динамике, росте, спаде, сезонности.",
     "get_metrica_catalog": "Справочник клиента: счётчики Метрики из его кампаний (название, сайт, есть ли доступ) и их цели с ID и названиями. Вызывай перед query_metrica и перед выбором целей.",
     "query_metrica": "Универсальный отчёт Метрики: сам выбери metrics, dimensions, filters, sort по вопросу пользователя. Период до 366 дней, compare=true добавляет прошлый период и изменения. Данные — весь трафик счётчика, если фильтр не ограничивает источник или кампании Директа.",
     "query_direct": "Универсальный отчёт Директа (Reports API): тип отчёта, поля-срезы и показатели, фильтры, цели для конверсий по каждой цели, сортировка. Период до 366 дней, compare=true — сравнение с прошлым периодом.",
@@ -52,6 +54,7 @@ SCHEMAS = {
     "get_metrica_direct_report": MetricaReportArgs,
     "get_campaign_goal_performance": CampaignGoalArgs,
     "get_metrica_catalog": CatalogArgs,
+    "get_half_year_trend": CatalogArgs,
     "query_metrica": MetricaQueryArgs,
     "query_direct": DirectQueryArgs,
 }
@@ -101,6 +104,24 @@ class ToolRegistry:
             if len(matches) != 1:
                 raise PermissionError
             client = await self.checks.ensure_goals(matches[0])
+            if name == "get_half_year_trend":
+                trend = await load_trend(self.checks, client)
+                return {
+                    "client_id": client.id,
+                    "source": "Direct Reports (основные цели); Metrica (рекламный трафик)",
+                    "period": {"start": str(trend["start"]), "end": str(trend["end"])},
+                    "weeks": [
+                        {
+                            "week_start": str(w["start"]),
+                            **calculate(w["totals"]).model_dump(
+                                mode="json", include={"spend", "clicks", "conversions", "cpa"}
+                            ),
+                        }
+                        for w in trend["weeks"]
+                    ],
+                    "quality_last4_vs_prev4": quality_periods(trend),
+                    "reading": summary(trend),
+                }
             if name == "get_metrica_catalog":
                 return {
                     "client_id": client.id,

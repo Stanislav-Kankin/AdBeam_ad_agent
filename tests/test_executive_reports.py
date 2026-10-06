@@ -332,3 +332,34 @@ async def test_half_year_trend_reads_weeks_and_renders(runtime, client):
     text = summary(trend)
     assert "Последние 4 недели к предыдущим 4" in text and "За полгода" in text
     assert render_trend(client.name, trend)[:4] == b"\x89PNG"
+
+
+def test_trend_reading_is_formatted_for_managers():
+    from datetime import date, timedelta
+
+    from app.analytics.trend import summary
+    from app.domain.reports import Totals
+
+    start = date(2026, 4, 6)
+    weeks = [
+        {
+            "start": start + timedelta(days=7 * i),
+            "totals": Totals(spend=100000, clicks=1000, conversions=20 if i < 22 else 32),
+        }
+        for i in range(26)
+    ]
+    quality = {
+        str(w["start"]): {
+            "bounce_rate": 19.0 if i < 22 else 21.9,
+            "page_depth": 4.3 if i < 22 else 3.8,
+            "duration": 275 if i < 22 else 235,
+        }
+        for i, w in enumerate(weeks)
+    }
+    text = summary({"start": start, "end": date(2026, 10, 4), "weeks": weeks, "quality": quality})
+    assert "**Последние 4 недели к предыдущим 4**" in text
+    assert "• Конверсии: **+60%**" in text
+    assert "• Отказы: **21,9%** (было 19,0%) — выше на 2,9 п.п." in text
+    assert "• Глубина: **3,8 стр.** (было 4,3 стр.) — меньше на 12%" in text
+    assert "• Время на сайте: **3:55** (было 4:35) — меньше на 15%" in text
+    assert "**Что это значит**" in text and "вовлечены слабее" in text

@@ -172,7 +172,7 @@ def build_dispatcher(runtime):
                     client = runtime.registry.require(chat_id, client_id)
                     trend = await load_trend(runtime.checks, client)
                     image = await asyncio.to_thread(render_trend, client_label(client), trend)
-                    await presentation.finish(summary(trend))
+                    await presentation.finish(summary(trend), markdown=True)
                     await retry_telegram(
                         lambda: callback.message.bot.send_photo(
                             chat_id,
