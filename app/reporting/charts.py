@@ -346,7 +346,12 @@ def render_trend(client_name, trend) -> bytes:
     return buffer.getvalue()
 
 
-def _hbars(draw, box, title, items, *, unit="%", legend=()):
+def _minutes(seconds):
+    seconds = int(float(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _hbars(draw, box, title, items, *, unit="%", legend=(), caption=None):
     """Horizontal grouped bars: items are (label, [(value, colour), ...])."""
     x1, y1, x2, y2 = box
     draw.rounded_rectangle(box, radius=26, fill="white", outline=GRID, width=2)
@@ -367,7 +372,13 @@ def _hbars(draw, box, title, items, *, unit="%", legend=()):
     bar_height = max(8, (row_height - 14) / max(1, len(items[0][1])))
     for index, (label, bars) in enumerate(items):
         y = top + index * row_height
-        draw.text((x1 + 28, y + 4), str(label)[:22], font=_font(18), fill=INK)
+        label = str(label)
+        draw.text(
+            (x1 + 28, y + 4),
+            label if len(label) <= 19 else label[:18] + "…",
+            font=_font(18),
+            fill=INK,
+        )
         for position, (value, colour) in enumerate(bars):
             by = y + position * bar_height
             width = (x2 - x1 - label_width - right) * float(value or 0) / high
@@ -375,8 +386,14 @@ def _hbars(draw, box, title, items, *, unit="%", legend=()):
             draw.rounded_rectangle(
                 (bx, by, bx + max(2, width), by + bar_height - 3), radius=4, fill=colour
             )
-            caption = "—" if value is None else _short(Decimal(str(value))) + unit
-            draw.text((bx + width + 8, by - 2), caption, font=_font(15), fill=MUTED)
+            text = (
+                "—"
+                if value is None
+                else caption(value)
+                if caption
+                else _short(Decimal(str(value))) + unit
+            )
+            draw.text((bx + width + 8, by - 2), text, font=_font(15), fill=MUTED)
 
 
 def render_audience(client_name, period_label, segments, quality) -> list[bytes]:
@@ -432,9 +449,9 @@ def render_audience(client_name, period_label, segments, quality) -> list[bytes]
         _hbars(
             draw,
             (815, 160, 1535, 560),
-            "Время на сайте по полу, сек.",
+            "Время на сайте по полу, мин:сек",
             metric(quality.get("gender"), "duration", BLUE),
-            unit="",
+            caption=_minutes,
         )
         _hbars(
             draw,
@@ -445,9 +462,9 @@ def render_audience(client_name, period_label, segments, quality) -> list[bytes]
         _hbars(
             draw,
             (815, 590, 1535, 1060),
-            "Время на сайте по возрасту, сек.",
+            "Время на сайте по возрасту, мин:сек",
             metric(quality.get("age"), "duration", BLUE),
-            unit="",
+            caption=_minutes,
         )
         draw.text(
             (65, 1080),
