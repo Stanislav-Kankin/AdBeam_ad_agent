@@ -642,58 +642,138 @@ def daily_digest(results):
     return redact("\n".join(lines))
 
 
+def audience_segments(payload, key):
+    """Direct segments with click share, conversion share and CPA."""
+    report = DirectData.model_validate(payload["direct"][key])
+    if report.status.value == "unavailable":
+        return None
+    rows = [row for row in report.rows if (row.totals.clicks or 0) > 0]
+    clicks = sum(row.totals.clicks or 0 for row in rows)
+    conversions = sum(row.totals.conversions or 0 for row in rows)
+    result = []
+    for row in sorted(rows, key=lambda item: item.totals.clicks or 0, reverse=True):
+        conv = row.totals.conversions or 0
+        result.append(
+            {
+                "id": row.name,
+                "name": AUDIENCE_NAMES.get(row.name, row.name),
+                "clicks_share": Decimal(row.totals.clicks or 0) / Decimal(clicks) * 100
+                if clicks
+                else Decimal(0),
+                "conversions_share": Decimal(conv) / Decimal(conversions) * 100
+                if conversions
+                else None,
+                "cpa": row.totals.spend / conv if row.totals.spend is not None and conv else None,
+            }
+        )
+    return result
+
+
+def duration_text(seconds):
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}" if seconds is not None else "—"
+
+
+def audience_insights(payload):
+    """Plain theses: segments that take clicks but not conversions, segments that
+    convert better than their share, and segments with noticeably worse engagement."""
+    notes = []
+    labels = {"gender": "Пол", "age": "Возраст", "income": "Доход"}
+    for key in ("gender", "age"):
+        rows = audience_segments(payload, key) or []
+        for row in rows:
+            clicks, conv = row["clicks_share"], row["conversions_share"]
+            if conv is None or clicks < 10:
+                continue
+            if conv < clicks * Decimal("0.7"):
+                notes.append(
+                    f"**{row['name']}** — {number_text(clicks, 0)}% кликов, но только "
+                    f"{number_text(conv, 0)}% конверсий: дорогой сегмент."
+                )
+            elif conv > clicks * Decimal("1.3"):
+                notes.append(
+                    f"**{row['name']}** — {number_text(clicks, 0)}% кликов и "
+                    f"{number_text(conv, 0)}% конверсий: конвертирует лучше остальных."
+                )
+    quality = payload.get("quality") or {}
+    for key in ("gender", "age"):
+        rows = [r for r in quality.get(key) or [] if r.get("bounce_rate") is not None]
+        visits = sum(Decimal(str(r.get("visits") or 0)) for r in rows)
+        if len(rows) < 2 or not visits:
+            continue
+        average = (
+            sum(Decimal(str(r["bounce_rate"])) * Decimal(str(r.get("visits") or 0)) for r in rows)
+            / visits
+        )
+        for row in rows:
+            share = Decimal(str(row.get("visits") or 0)) / visits * 100
+            if share >= 10 and Decimal(str(row["bounce_rate"])) >= average + 5:
+                notes.append(
+                    f"**{row['name']}** ({labels[key].lower()}): отказы "
+                    f"{number_text(row['bounce_rate'], 1)}% при среднем "
+                    f"{number_text(average, 1)}% — реклама или посадочная не попадают."
+                )
+    return notes[:5]
+
+
 def audience_report(client_name, payload) -> str:
     period = payload["period"]
     lines = [
-        f"👥 Аудитория · {client_name}",
+        f"👥 **Аудитория · {client_name}**",
         "Период: " + DateRange(start=period["start"], end=period["end"]).label(),
-        "",
-        "Рекламный трафик Директа:",
     ]
-    labels = {"age": "Возраст", "gender": "Пол", "income": "Доход"}
-    for key in ("age", "gender", "income"):
-        report = DirectData.model_validate(payload["direct"][key])
-        rows = [row for row in report.rows if (row.totals.clicks or 0) > 0]
-        total = sum(row.totals.clicks or 0 for row in rows)
-        lines.append(f"{labels[key]}:")
-        if report.status.value == "unavailable":
-            # A failed Direct report is not the same as an empty audience.
+    labels = {"gender": "Пол", "age": "Возраст", "income": "Доход"}
+    quality = payload.get("quality") or {}
+    for key in ("gender", "age", "income"):
+        rows = audience_segments(payload, key)
+        lines += ["", f"**{labels[key]}** · клики / конверсии · Директ"]
+        if rows is None:
             lines.append("• не загрузилось из Директа — повторите через несколько минут")
             continue
-        if not rows or not total:
+        if not rows:
             lines.append("• нет данных")
             continue
-        for row in sorted(rows, key=lambda item: item.totals.clicks or 0, reverse=True)[:5]:
-            share = Decimal(row.totals.clicks or 0) / Decimal(total) * 100
-            cpa = (
-                row.totals.spend / row.totals.conversions
-                if row.totals.spend is not None and (row.totals.conversions or 0) > 0
-                else None
-            )
-            suffix = f"; CPA {value_text('cpa', cpa)}" if cpa is not None else ""
-            lines.append(
-                f"• {AUDIENCE_NAMES.get(row.name, row.name)}: "
-                f"{number_text(share, 1)}% кликов{suffix}"
-            )
+        for row in rows[:6]:
+            text = f"• {row['name']}: **{number_text(row['clicks_share'], 0)}%** кликов"
+            if row["conversions_share"] is not None:
+                text += f" · **{number_text(row['conversions_share'], 0)}%** конверсий"
+            if row["cpa"] is not None:
+                text += f" · CPA {value_text('cpa', row['cpa'])}"
+            lines.append(text)
+        if quality.get(key):
+            lines.append("  Качество визитов из рекламы (Метрика):")
+            for item in sorted(
+                quality[key], key=lambda r: Decimal(str(r.get("visits") or 0)), reverse=True
+            )[:6]:
+                if item.get("bounce_rate") is None:
+                    continue
+                lines.append(
+                    f"  ◦ {item['name']}: отказы {number_text(item['bounce_rate'], 1)}%, "
+                    f"{number_text(item.get('page_depth') or 0, 1)} стр., "
+                    f"{duration_text(item.get('duration'))} на сайте"
+                )
 
     interests = payload.get("interests", {})
-    lines += ["", "Долгосрочные интересы аудитории сайта (Метрика):"]
+    lines += ["", "**Интересы аудитории сайта** · Метрика"]
     if interests.get("rows"):
-        for row in interests["rows"][:7]:
+        for row in interests["rows"][:6]:
             lines.append(
-                f"• {row['name']}: аффинити {fmt_short(row.get('affinity'), money=True)}; "
-                f"пользователи {fmt_short(row.get('users'))}"
+                f"• {row['name']}: аффинити **{fmt_short(row.get('affinity'), money=True)}**"
             )
     else:
         lines.append("• данные не получены")
+    insights = audience_insights(payload)
+    if insights:
+        lines += ["", "**Что это значит**", *[f"• {note}" for note in insights]]
+    if not quality:
+        lines += [
+            "",
+            "Качество трафика по сегментам не показано: нет доступа к счётчику Метрики.",
+        ]
     lines += [
         "",
-        "Важно: возраст, пол и доход относятся к рекламе клиента в Директе; "
-        "интересы — ко всему трафику выбранных счётчиков Метрики.",
+        "Пол, возраст и доход — реклама в Директе; качество визитов — рекламный трафик "
+        "в Метрике; интересы — весь трафик счётчика.",
     ]
-    limitations = interests.get("limitations") or []
-    if limitations:
-        lines.append(f"Ограничения: {len(limitations)}. Подробности сохранены в диагностике.")
     return redact("\n".join(lines))
 
 

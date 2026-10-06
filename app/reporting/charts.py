@@ -344,3 +344,119 @@ def render_trend(client_name, trend) -> bytes:
     buffer = BytesIO()
     image.save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()
+
+
+def _hbars(draw, box, title, items, *, unit="%", legend=()):
+    """Horizontal grouped bars: items are (label, [(value, colour), ...])."""
+    x1, y1, x2, y2 = box
+    draw.rounded_rectangle(box, radius=26, fill="white", outline=GRID, width=2)
+    draw.text((x1 + 28, y1 + 22), title, font=_font(25, bold=True), fill=INK)
+    lx = x1 + 28
+    for text, colour in legend:
+        draw.rectangle((lx, y1 + 66, lx + 18, y1 + 84), fill=colour)
+        draw.text((lx + 26, y1 + 64), text, font=_font(17), fill=MUTED)
+        lx += 40 + len(text) * 10
+    if not items:
+        draw.text((x1 + 28, y1 + 110), "нет данных", font=_font(20), fill=MUTED)
+        return
+    top = y1 + 104
+    values = [float(v or 0) for _, bars in items for v, _ in bars]
+    high = max(values, default=0) or 1
+    label_width, right = 230, 110
+    row_height = min(64, (y2 - top - 20) / len(items))
+    bar_height = max(8, (row_height - 14) / max(1, len(items[0][1])))
+    for index, (label, bars) in enumerate(items):
+        y = top + index * row_height
+        draw.text((x1 + 28, y + 4), str(label)[:22], font=_font(18), fill=INK)
+        for position, (value, colour) in enumerate(bars):
+            by = y + position * bar_height
+            width = (x2 - x1 - label_width - right) * float(value or 0) / high
+            bx = x1 + label_width
+            draw.rounded_rectangle(
+                (bx, by, bx + max(2, width), by + bar_height - 3), radius=4, fill=colour
+            )
+            caption = "—" if value is None else _short(Decimal(str(value))) + unit
+            draw.text((bx + width + 8, by - 2), caption, font=_font(15), fill=MUTED)
+
+
+def render_audience(client_name, period_label, segments, quality) -> list[bytes]:
+    """Slides: who clicks vs who converts (Direct); engagement of ad visits (Metrica)."""
+    slides = []
+    image = Image.new("RGB", (WIDTH, HEIGHT), "#F1F5F9")
+    draw = ImageDraw.Draw(image)
+    draw.text((65, 45), client_name, font=_font(42, bold=True), fill=INK)
+    draw.text(
+        (65, 100), f"Кто кликает и кто конвертирует · {period_label}", font=_font(24), fill=MUTED
+    )
+    legend = (("доля кликов", BLUE), ("доля конверсий", GREEN))
+
+    def shares(rows):
+        return [
+            (row["name"], [(row["clicks_share"], BLUE), (row["conversions_share"], GREEN)])
+            for row in (rows or [])[:6]
+        ]
+
+    _hbars(draw, (65, 160, 1535, 430), "Пол", shares(segments.get("gender")), legend=legend)
+    _hbars(draw, (65, 460, 790, 1060), "Возраст", shares(segments.get("age")), legend=legend)
+    _hbars(draw, (815, 460, 1535, 1060), "Доход", shares(segments.get("income")), legend=legend)
+    draw.text(
+        (65, 1080),
+        "Источник: Директ. Если доля конверсий ниже доли кликов — сегмент обходится дороже.",
+        font=_font(18),
+        fill=MUTED,
+    )
+    buffer = BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    slides.append(buffer.getvalue())
+
+    if quality:
+        image = Image.new("RGB", (WIDTH, HEIGHT), "#F1F5F9")
+        draw = ImageDraw.Draw(image)
+        draw.text((65, 45), client_name, font=_font(42, bold=True), fill=INK)
+        draw.text(
+            (65, 100),
+            f"Качество визитов из рекламы · {period_label}",
+            font=_font(24),
+            fill=MUTED,
+        )
+
+        def metric(rows, field, colour):
+            return [(row["name"], [(row.get(field), colour)]) for row in (rows or [])[:7]]
+
+        _hbars(
+            draw,
+            (65, 160, 790, 560),
+            "Отказы по полу",
+            metric(quality.get("gender"), "bounce_rate", RED),
+        )
+        _hbars(
+            draw,
+            (815, 160, 1535, 560),
+            "Время на сайте по полу, сек.",
+            metric(quality.get("gender"), "duration", BLUE),
+            unit="",
+        )
+        _hbars(
+            draw,
+            (65, 590, 790, 1060),
+            "Отказы по возрасту",
+            metric(quality.get("age"), "bounce_rate", RED),
+        )
+        _hbars(
+            draw,
+            (815, 590, 1535, 1060),
+            "Время на сайте по возрасту, сек.",
+            metric(quality.get("age"), "duration", BLUE),
+            unit="",
+        )
+        draw.text(
+            (65, 1080),
+            "Источник: Метрика, визиты с рекламы. Высокие отказы и короткие визиты — "
+            "реклама или посадочная не попадают в сегмент.",
+            font=_font(18),
+            fill=MUTED,
+        )
+        buffer = BytesIO()
+        image.save(buffer, format="PNG", optimize=True)
+        slides.append(buffer.getvalue())
+    return slides

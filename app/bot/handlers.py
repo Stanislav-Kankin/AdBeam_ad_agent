@@ -6,7 +6,12 @@ from time import monotonic
 
 from aiogram import Dispatcher, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+)
 
 from app.analytics.periods import AnalysisPeriod, make_period
 from app.analytics.progress import progress_state
@@ -19,8 +24,16 @@ from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities, retry_telegram
 from app.domain.reports import CheckMode, ClientReport, TriggerSource
 from app.reporting.balance import balance_text
-from app.reporting.charts import render_dynamics, render_trend
-from app.reporting.formatter import audience_report, campaigns_view, detailed, split_message
+from app.reporting.charts import render_audience, render_dynamics, render_trend
+from app.reporting.formatter import (
+    audience_report,
+    audience_segments,
+    campaigns_view,
+    detailed,
+    split_message,
+    weekly_digest,
+)
+from app.scheduler.jobs import DailySchedule
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +218,34 @@ def build_dispatcher(runtime):
                     client = runtime.registry.require(chat_id, client_id)
                     period = AnalysisPeriod.model_validate(period_data)
                     payload = await runtime.checks.audience(client, period)
-                    await presentation.finish(audience_report(client_label(client), payload))
+                    await presentation.finish(
+                        audience_report(client_label(client), payload), markdown=True
+                    )
+                    segments = {
+                        key: audience_segments(payload, key) for key in ("gender", "age", "income")
+                    }
+                    slides = await asyncio.to_thread(
+                        render_audience,
+                        client_label(client),
+                        period.current.label(),
+                        segments,
+                        payload.get("quality"),
+                    )
+                    media = [
+                        InputMediaPhoto(
+                            media=BufferedInputFile(slide, filename=f"audience-{i}.png"),
+                            caption=f"👥 {client_label(client)} · аудитория" if i == 0 else None,
+                        )
+                        for i, slide in enumerate(slides)
+                    ]
+                    await retry_telegram(
+                        lambda: callback.message.bot.send_media_group(
+                            chat_id,
+                            media,
+                            message_thread_id=topic_of(callback.message),
+                            request_timeout=30,
+                        )
+                    )
                 finally:
                     await presentation.stop()
                     progress_state.reset(token)
@@ -467,6 +507,50 @@ def build_dispatcher(runtime):
             await message.answer(
                 "Выбор отменён, контекст диалога очищен. Уже запущенные проверки продолжатся."
             )
+        elif name == "digest":
+            # The weekly digest on demand: all clients of this chat (the team view in a
+            # group, the person's own clients in a private chat).
+            ids = [c.id for c in runtime.registry.visible(message.chat.id)]
+            if not ids:
+                await message.answer("В этом чате нет доступных клиентов.")
+                return
+            presentation = ReportMessage(message)
+
+            async def digest_work():
+                state = {"stage": f"собираю прошлую неделю по {len(ids)} клиентам"}
+                token = progress_state.set(state)
+                try:
+                    await presentation.start(state)
+                    period = DailySchedule.last_week()
+                    reports, _ = await runtime.checks.run_check(
+                        ids,
+                        period,
+                        CheckMode.STANDARD,
+                        TriggerSource.INTERNAL,
+                        chat_id=message.chat.id,
+                        user_id=message.from_user.id,
+                    )
+                    failed = [cid for cid in ids if cid not in {r.client_id for r in reports}]
+                    title = (
+                        "Ваши клиенты за неделю"
+                        if message.chat.type == "private"
+                        and message.from_user.id not in runtime.settings.telegram_admin_user_ids
+                        else "Сводка за неделю"
+                    )
+                    await presentation.finish(
+                        weekly_digest(reports, period, failed, title=title), markdown=True
+                    )
+                finally:
+                    await presentation.stop()
+                    progress_state.reset(token)
+
+            async def digest_failed():
+                await presentation.finish("Не удалось собрать сводку. Ошибка записана в журнал.")
+
+            if not runtime.jobs.start(
+                (message.chat.id, message.from_user.id), digest_work, digest_failed
+            ):
+                await message.answer("Другой запрос уже выполняется. Попробуйте позже.")
         elif name == "balance":
             if message.from_user.id not in runtime.settings.telegram_admin_user_ids:
                 await message.answer("Команда доступна пользователям из TELEGRAM_ADMIN_USER_IDS.")

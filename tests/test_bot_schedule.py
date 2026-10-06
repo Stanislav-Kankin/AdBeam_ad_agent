@@ -12,6 +12,7 @@ from aiogram.methods import (
     EditMessageReplyMarkup,
     EditMessageText,
     GetMe,
+    SendMediaGroup,
     SendMessage,
     SendPhoto,
 )
@@ -40,6 +41,15 @@ class FakeTelegram(BaseSession):
             return True
         if isinstance(method, DeleteMessage):
             return True
+        if isinstance(method, SendMediaGroup):
+            return [
+                Message(
+                    message_id=len(self.sent) + index,
+                    date=datetime.now(UTC),
+                    chat=Chat(id=int(method.chat_id), type="private"),
+                )
+                for index, _ in enumerate(method.media)
+            ]
         if isinstance(method, SendMessage | SendPhoto | EditMessageReplyMarkup | EditMessageText):
             return Message(
                 message_id=len(self.sent),
@@ -210,7 +220,7 @@ async def test_single_client_check_offers_on_demand_technical_details(runtime):
         if isinstance(item, (SendMessage, EditMessageText)) and item.text
     )
     assert "Аудитория" in audience
-    assert "Рекламный трафик Директа:" in audience
+    assert "**Пол**" not in audience and "Пол · клики / конверсии · Директ" in audience
 
 
 async def test_campaigns_view_renders_markdown_not_asterisks(runtime):
@@ -716,3 +726,53 @@ async def test_admin_assigns_clients_to_a_manager(runtime):
         await click("West")
         assert "Отмечено: 1" in session.sent[-1].text
     assert (await runtime.checks.repository.bot_users())[2]["client_ids"] == ["west_export"]
+
+
+async def test_digest_command_sends_last_week_now(runtime):
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+        await dp.feed_update(bot, message_update("/digest"))
+        await runtime.jobs.close()
+    texts = [getattr(m, "text", "") or "" for m in session.sent]
+    assert any("Сводка за неделю" in text and "West" in text for text in texts)
+
+
+async def test_audience_button_sends_slides_and_theses(runtime):
+    from aiogram.types import CallbackQuery
+
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+        await dp.feed_update(bot, message_update('/check "West Экспорт" 7d'))
+        await runtime.jobs.close()
+        offer = next(
+            item
+            for item in session.sent
+            if isinstance(item, SendMessage) and item.text == "Дополнительные данные"
+        )
+        data = next(
+            row[0].callback_data
+            for row in offer.reply_markup.inline_keyboard
+            if "Аудитория" in row[0].text
+        )
+        before = len(session.sent)
+        await dp.feed_update(
+            bot,
+            Update(
+                update_id=2,
+                callback_query=CallbackQuery(
+                    id="audience",
+                    from_user=User(id=1, is_bot=False, first_name="User"),
+                    chat_instance="test",
+                    message=message_update("details").message,
+                    data=data,
+                ),
+            ),
+        )
+        await runtime.jobs.close()
+    sent = session.sent[before:]
+    albums = [m for m in sent if isinstance(m, SendMediaGroup)]
+    assert albums and len(albums[0].media) == 2  # clicks vs conversions; visit quality
+    text = "\n".join(getattr(m, "text", "") or "" for m in sent)
+    assert "Аудитория" in text and "Качество визитов из рекламы" in text

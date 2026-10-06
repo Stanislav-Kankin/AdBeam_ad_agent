@@ -303,16 +303,17 @@ class CheckService:
                 or payload.get("interests", {}).get("status") == "unavailable"
             )
 
-        cached = await self.repository.cached_analysis(client.id, period.current, "audience")
+        cached = await self.repository.cached_analysis(client.id, period.current, "audience2")
         # A cached failure would hide the audience for hours; retry it instead.
         if cached is not None and not failed(cached):
             logger.info("Audience cache hit client=%s", client.id)
             return cached
-        age, gender, income, interests = await asyncio.gather(
+        age, gender, income, interests, quality = await asyncio.gather(
             self.breakdown(client, period.current, "age"),
             self.breakdown(client, period.current, "gender"),
             self.breakdown(client, period.current, "income"),
             self.provider.audience_interests(client, period.current),
+            self.audience_quality(client, period.current),
         )
         result = {
             "client_id": client.id,
@@ -322,6 +323,7 @@ class CheckService:
                 for name, value in (("age", age), ("gender", gender), ("income", income))
             },
             "interests": interests,
+            "quality": quality,
         }
         if failed(result):
             logger.warning(
@@ -330,8 +332,59 @@ class CheckService:
                 [v.limitations for v in (age, gender, income)],
             )
         else:
-            await self.repository.save_analysis(client.id, period.current, "audience", result)
+            await self.repository.save_analysis(client.id, period.current, "audience2", result)
         return result
+
+    async def audience_quality(self, client, date_range):
+        """Ad visits by gender and age from Metrica: bounce rate, depth, time on site and
+        reaches of the main goals. None when the counter is not accessible."""
+        goals = list(client.metrica.main_goal_ids)[:3]
+        metrics = [
+            "ym:s:visits",
+            "ym:s:bounceRate",
+            "ym:s:pageDepth",
+            "ym:s:avgVisitDurationSeconds",
+            *[f"ym:s:goal{goal}reaches" for goal in goals],
+        ]
+        try:
+            counters = await self.provider.client_counters(client)
+            if not counters:
+                return None
+            result = {}
+            for name, dimension in (("gender", "ym:s:gender"), ("age", "ym:s:ageInterval")):
+                data = await self.provider.metrica_query(
+                    client,
+                    counters[0],
+                    date_range.start,
+                    date_range.end,
+                    metrics=metrics,
+                    dimensions=[dimension],
+                    filters="ym:s:lastTrafficSource=='ad'",
+                    sort=dimension,
+                    limit=20,
+                )
+                rows = []
+                for row in data.get("rows", []):
+                    values = row["metrics"]
+                    reaches = sum(
+                        Decimal(str(values.get(f"ym:s:goal{goal}reaches") or 0)) for goal in goals
+                    )
+                    rows.append(
+                        {
+                            "id": row["dimensions"][0]["id"],
+                            "name": row["dimensions"][0]["name"],
+                            "visits": values.get("ym:s:visits"),
+                            "bounce_rate": values.get("ym:s:bounceRate"),
+                            "page_depth": values.get("ym:s:pageDepth"),
+                            "duration": values.get("ym:s:avgVisitDurationSeconds"),
+                            "goal_reaches": reaches if goals else None,
+                        }
+                    )
+                result[name] = rows
+            return safe_json(result)
+        except Exception as exc:
+            logger.info("Audience quality unavailable client=%s error=%s", client.id, exc)
+            return None
 
     async def ensure_goals(self, client):
         """Main goals without manual work: goals starred as favourites in Metrica, else

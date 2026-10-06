@@ -152,9 +152,10 @@ async def test_audience_breakdown_is_readable_and_cached(runtime, client, monkey
 
     assert first == second
     assert spy.await_count == 3
-    assert "Возраст:" in text and "Пол:" in text and "Доход:" in text
-    assert "Долгосрочные интересы" in text
+    assert "**Возраст**" in text and "**Пол**" in text and "**Доход**" in text
+    assert "**Интересы аудитории сайта**" in text
     assert "аффинити" in text
+    assert "Качество визитов из рекламы (Метрика)" in text
 
 
 async def test_failed_audience_is_not_cached_and_says_so(runtime, client, monkeypatch):
@@ -363,3 +364,39 @@ def test_trend_reading_is_formatted_for_managers():
     assert "• Глубина: **3,8 стр.** (было 4,3 стр.) — меньше на 12%" in text
     assert "• Время на сайте: **3:55** (было 4:35) — меньше на 15%" in text
     assert "**Что это значит**" in text and "вовлечены слабее" in text
+
+
+def test_audience_insights_name_costly_and_converting_segments():
+    from app.domain.reports import BreakdownRow, DataStatus, DirectData, Totals
+    from app.reporting.formatter import audience_insights
+
+    period = make_period("7d").current
+
+    def data(rows):
+        return DirectData(
+            status=DataStatus.OK,
+            period=period,
+            rows=[
+                BreakdownRow(id=k, name=k, totals=Totals(spend=s, clicks=c, conversions=v))
+                for k, s, c, v in rows
+            ],
+        ).model_dump(mode="json")
+
+    payload = {
+        "direct": {
+            # Marina's case: women take the clicks, men leave the leads.
+            "gender": data([("GENDER_FEMALE", 8000, 800, 2), ("GENDER_MALE", 2000, 200, 98)]),
+            "age": data([]),
+            "income": data([]),
+        },
+        "quality": {
+            "gender": [
+                {"name": "женщины", "visits": 800, "bounce_rate": 40.0},
+                {"name": "мужчины", "visits": 200, "bounce_rate": 12.0},
+            ]
+        },
+    }
+    notes = "\n".join(audience_insights(payload))
+    assert "**женщины** — 80% кликов, но только 2% конверсий" in notes
+    assert "**мужчины** — 20% кликов и 98% конверсий" in notes
+    assert "отказы 40% при среднем 34,4%" in notes
