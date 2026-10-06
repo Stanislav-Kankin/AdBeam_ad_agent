@@ -279,11 +279,10 @@ def install_menu(router, runtime, launch, launch_chart):
                     f"\nДоступно: {available}; без доступа: {forbidden}"
                     f"\nВыбрано: {len(selected)}"
                     f"\nОсновных целей: {len(client.metrica.main_goal_ids)} из 10"
-                    + (
-                        " (автоматически из кампаний; выбор вручную заменит их)"
-                        if client.direct.goals_source == "campaigns"
-                        else ""
-                    )
+                    + {
+                        "favorites": " (избранные в Метрике)",
+                        "campaigns": " (из настроек кампаний)",
+                    }.get(client.direct.goals_source, " (выбраны вручную)")
                 )
             row("🔄 Обновить доступы", "refresh_data", client_id=client_id, page=page)
             row("📟 Выбрать счётчики", "counters", client_id=client_id, page=0)
@@ -376,17 +375,29 @@ def install_menu(router, runtime, launch, launch_chart):
             )
             pages = max(1, (len(ordered) + GOAL_PAGE_SIZE - 1) // GOAL_PAGE_SIZE)
             page = min(max(page, 0), pages - 1)
+            source = {
+                "favorites": "избранные в Метрике (автоматически)",
+                "campaigns": "из настроек кампаний (в Метрике нет избранных)",
+            }.get(client.direct.goals_source, "выбраны вручную в боте")
             text = badge + (
                 f"Основные цели\n{client.name}\n"
+                f"Сейчас: {source}\n"
                 f"Выбрано: {len(selected)} из 10 · Страница {page + 1} из {pages}\n"
-                "Не выбирайте пересекающиеся цели: их достижения суммируются."
+                "⭐ — избранная в Метрике. Удобнее всего отметить 1–2 главные цели звёздочкой "
+                "в Метрике: бот возьмёт их сам. Не выбирайте пересекающиеся цели "
+                "(звонок и клик по номеру): их достижения суммируются."
             )
+            if client.direct.goals_source == "manual":
+                row(
+                    "⭐ Брать избранные из Метрики автоматически", "auto_goals", client_id=client_id
+                )
             if not ordered:
                 text += "\nКаталог целей ещё не загружен. Обновите доступы."
             for goal in ordered[page * GOAL_PAGE_SIZE : (page + 1) * GOAL_PAGE_SIZE]:
                 row(
                     (
                         ("✅ " if goal["id"] in selected else "▫️ ")
+                        + ("⭐ " if goal.get("favorite") else "")
                         + goal["name"]
                         + f" · {goal['id']}"
                     )[:100],
@@ -539,6 +550,7 @@ def install_menu(router, runtime, launch, launch_chart):
                     "counter_unavailable",
                     "goals",
                     "toggle_goal",
+                    "auto_goals",
                     "kpi",
                     "set_kpi",
                     "set_tolerance",
@@ -641,6 +653,15 @@ def install_menu(router, runtime, launch, launch_chart):
                 page=kwargs.get("page", 0),
                 mode=kwargs.get("mode"),
             )
+        elif action == "auto_goals":
+            client = runtime.registry.require(chat, kwargs["client_id"])
+            updated = await runtime.checks.reset_goals(client, user)
+            if not updated.direct.main_goal_ids:
+                await callback.message.answer(
+                    "В Метрике нет избранных целей, а в кампаниях — заданных целей. "
+                    "Отметьте 1–2 главные цели звёздочкой в Метрике или выберите их здесь."
+                )
+            await show(callback.message, user, screen="goals", edit=True, client_id=client.id)
         elif action == "toggle_goal":
             client = runtime.registry.require(chat, kwargs["client_id"])
             selected = set(client.metrica.main_goal_ids)

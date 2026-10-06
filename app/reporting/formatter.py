@@ -345,7 +345,7 @@ def card(report: ClientReport, summary: str | None = None) -> str:
     if any(v.startswith("Конверсии могут") for v in report.limitations):
         footer += " Конверсии за последние дни ещё дополняются."
     lines += ["", footer]
-    if report.goals_source == "campaigns" and report.main_goal_ids:
+    if report.goals_source in ("favorites", "campaigns") and report.main_goal_ids:
         named = [
             g["name"]
             for g in report.goal_metrics
@@ -356,9 +356,12 @@ def card(report: ClientReport, summary: str | None = None) -> str:
             ", ".join(dict.fromkeys(named[:3]))
             or f"{count} {plural(count, 'цель', 'цели', 'целей')}"
         )
-        lines.append(
-            f"Цели взяты из настроек кампаний: {goals}. Выбрать вручную — «Данные и цели»."
+        origin = (
+            "избранные в Метрике"
+            if report.goals_source == "favorites"
+            else "взяты из настроек кампаний"
         )
+        lines.append(f"Цели — {origin}: {goals}.")
     return redact("\n".join(lines))
 
 

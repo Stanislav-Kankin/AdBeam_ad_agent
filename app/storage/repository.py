@@ -570,8 +570,8 @@ class Repository:
                 "direct": client.direct.model_copy(
                     update={
                         "main_goal_ids": goals,
-                        "goals_source": "campaigns"
-                        if row.goals_source == "campaigns" and goals
+                        "goals_source": row.goals_source
+                        if row.goals_source in ("favorites", "campaigns") and goals
                         else "manual",
                     }
                 ),

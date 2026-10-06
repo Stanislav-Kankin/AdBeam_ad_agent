@@ -81,6 +81,7 @@ class MetricaInventory:
                 "id": str(row["id"]),
                 "name": str(row.get("name") or row["id"])[:200],
                 "type": str(row.get("type") or "")[:50],
+                "favorite": bool(row.get("is_favorite") or row.get("favorite")),
             }
             for row in goals
         ]

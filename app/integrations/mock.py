@@ -203,6 +203,11 @@ class MockProvider:
             }
         ]
 
+    FAVORITES: list[str] = []
+
+    async def favorite_goals(self, client):
+        return list(self.FAVORITES)
+
     async def client_counters(self, client):
         return [client.metrica.counter_id or 1]
 

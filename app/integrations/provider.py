@@ -26,6 +26,7 @@ class AnalyticsProvider(Protocol):
     async def demographic_adjustments(self, client, campaign_ids): ...
     async def goal_names(self, client, counter_ids): ...
     async def client_counters(self, client) -> list[int]: ...
+    async def favorite_goals(self, client) -> list[str]: ...
     async def metrica_catalog(self, client, counter_ids): ...
     async def metrica_query(self, client, counter_id, start, end, **query): ...
     async def direct_query(self, client, start, end, **query): ...
@@ -87,6 +88,16 @@ class ProductionProvider:
 
     async def metrica_catalog(self, client, counter_ids):
         return await self.metrica.catalog(client, counter_ids)
+
+    async def favorite_goals(self, client):
+        catalog = await self.metrica.catalog(client, await self.client_counters(client))
+        return [
+            goal["id"]
+            for counter in catalog
+            if counter["access"] == "ok"
+            for goal in counter["goals"]
+            if goal.get("favorite")
+        ]
 
     async def metrica_query(self, client, counter_id, start, end, **query):
         return await self.metrica.query(client, counter_id, start, end, **query)

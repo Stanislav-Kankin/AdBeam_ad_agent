@@ -87,9 +87,10 @@ async def describe_data(runtime, chat_id, client_id):
         "",
         f"Основных целей: {len(client.direct.main_goal_ids)} из 10"
         + (
-            " (взяты автоматически из настроек кампаний)"
-            if client.direct.goals_source == "campaigns"
-            else ""
+            {
+                "favorites": " (избранные в Метрике)",
+                "campaigns": " (из настроек кампаний: в Метрике нет избранных целей)",
+            }.get(client.direct.goals_source, " (выбраны вручную в боте)")
         ),
         f"Выбрано счётчиков в каталоге: {len(selected)}",
     ]
@@ -97,8 +98,8 @@ async def describe_data(runtime, chat_id, client_id):
         lines.append(f"• {c['id']}: {c['status']} · проверено {stamp(c['checked_at'])}")
     if not client.direct.main_goal_ids:
         lines.append(
-            "Основные цели не выбраны; при следующей проверке бот возьмёт их из "
-            "настроек кампаний. Выбрать вручную — «Данные и цели»."
+            "Основные цели не выбраны. Отметьте 1–2 цели звёздочкой (избранные) в Метрике — "
+            "бот возьмёт их сам при следующей проверке."
         )
     job = runtime.schedule.scheduler.get_job("warehouse_warm") if runtime.schedule else None
     eligible = client.id in {

@@ -23,6 +23,11 @@ DIRECT_REPORT_DIMENSIONS = {
 }
 
 
+def is_favorite(goal):
+    """Goals a specialist starred in Metrica are the ones that matter for the client."""
+    return bool(goal.get("is_favorite") or goal.get("favorite"))
+
+
 class MetricaAdapter:
     def __init__(self, transport: ReadTransport):
         self.transport = transport
@@ -238,6 +243,7 @@ class MetricaAdapter:
                             "id": str(goal["id"]),
                             "name": redact(str(goal.get("name") or goal["id"]))[:150],
                             "type": str(goal.get("type") or "")[:40],
+                            "favorite": is_favorite(goal),
                         }
                         for goal in goals.get("goals") or []
                         if isinstance(goal, dict) and "id" in goal

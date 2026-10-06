@@ -334,15 +334,22 @@ class CheckService:
         return result
 
     async def ensure_goals(self, client):
-        """Nobody chose main goals: take each campaign's primary goal from its settings.
-        A person's choice always wins; automatic goals are re-read every 12 hours so
-        the bot follows goal changes made in the ad account."""
+        """Main goals without manual work: goals starred as favourites in Metrica, else
+        each campaign's primary goal. A choice made in the bot menu wins; automatic
+        goals are re-read every 12 hours so the bot follows changes in the accounts."""
         if client.direct.main_goal_ids and client.direct.goals_source == "manual":
             return client
         checked = self.goals_checked.get(client.id)
         if checked is not None and monotonic() - checked < GOALS_REFRESH_SECONDS:
             return client
         self.goals_checked[client.id] = monotonic()
+        try:
+            favorites = list(dict.fromkeys(await self.provider.favorite_goals(client)))[:10]
+        except Exception as exc:
+            logger.warning("Favourite goals failed client=%s error=%s", client.id, exc)
+            favorites = []
+        if favorites:
+            return await self.apply_goals(client, favorites, "favorites")
         try:
             settings = await self.provider.campaign_goals(client)
         except Exception as exc:
@@ -356,14 +363,28 @@ class CheckService:
             if row.get("primary_goal_id"):
                 counts[row["primary_goal_id"]] = counts.get(row["primary_goal_id"], 0) + 1
         goals = sorted(counts, key=lambda goal: (-counts[goal], goal))[:10]
-        if not goals or (goals == client.direct.main_goal_ids):
+        if not goals:
             return client
-        logger.info("Automatic goals client=%s goals=%s", client.id, goals)
+        return await self.apply_goals(client, goals, "campaigns")
+
+    async def apply_goals(self, client, goals, source):
+        if goals == client.direct.main_goal_ids and source == client.direct.goals_source:
+            return client
+        logger.info("Automatic goals client=%s source=%s goals=%s", client.id, source, goals)
         updated = await self.repository.save_client_preferences(
-            client, goal_ids=goals, goals_source="campaigns"
+            client, goal_ids=goals, goals_source=source
         )
         self.registry.clients[client.id] = updated
         return updated
+
+    async def reset_goals(self, client, user_id=None):
+        """Drop the menu choice and return to automatic goals right away."""
+        updated = await self.repository.save_client_preferences(
+            client, goal_ids=[], user_id=user_id
+        )
+        self.registry.clients[client.id] = updated
+        self.goals_checked.pop(client.id, None)
+        return await self.ensure_goals(updated)
 
     async def campaign_goal_performance(
         self, client, start, end, *, top_n=20, segment=None, campaign_ids=None

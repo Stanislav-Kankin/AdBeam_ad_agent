@@ -158,7 +158,7 @@ async def test_card_takes_campaign_goals_when_none_are_chosen(runtime, client):
     assert stored.direct.goals_source == "campaigns"
     assert reports[0].main_goal_ids == ["5001"]
     assert reports[0].current.conversions is not None
-    assert "Цели взяты из настроек кампаний" in text
+    assert "Цели — взяты из настроек кампаний" in text
     assert "цели не выбраны" not in text.casefold()
 
     # A restart re-reads the stored profile with the same source.
@@ -281,3 +281,62 @@ async def test_hidden_master_campaigns_do_not_mean_no_active_campaigns(
     assert "no_active_campaigns" not in types
     hidden = next(s for s in report.signals if s.type == "hidden_campaigns")
     assert hidden.actual["campaign_ids"] == ["102"]
+
+
+async def test_goals_starred_in_metrica_win_over_campaign_goals(runtime, client):
+    from app.analytics.periods import make_period
+    from app.domain.reports import CheckMode, TriggerSource
+
+    runtime.checks.provider.FAVORITES = ["5003", "5001"]
+    without_goals(runtime, client)
+    reports, text = await runtime.checks.run_check(
+        [client.id],
+        make_period("7d"),
+        CheckMode.STANDARD,
+        TriggerSource.INTERNAL,
+        chat_id=123456789,
+    )
+    stored = runtime.registry.clients[client.id]
+    assert stored.direct.main_goal_ids == ["5003", "5001"]
+    assert stored.direct.goals_source == "favorites"
+    assert "Цели — избранные в Метрике" in text
+
+
+async def test_reset_returns_manual_goals_to_metrica_favourites(runtime, client):
+    runtime.checks.provider.FAVORITES = ["5003"]
+    manual = await runtime.checks.repository.save_client_preferences(
+        client, goal_ids=["5001", "5004"], user_id=1
+    )
+    runtime.registry.clients[client.id] = manual
+    assert await runtime.checks.ensure_goals(manual) is manual  # a menu choice wins
+    auto = await runtime.checks.reset_goals(manual, 1)
+    assert auto.direct.main_goal_ids == ["5003"]
+    assert auto.direct.goals_source == "favorites"
+
+
+async def test_metrica_catalog_reads_the_favourite_star(client, monkeypatch):
+    from app.integrations.metrica import MetricaAdapter
+
+    monkeypatch.setenv("METRICA_OAUTH_TOKEN", "test-token-not-real")
+
+    def handler(request):
+        if request.url.path.endswith("/goals"):
+            return httpx.Response(
+                200,
+                json={
+                    "goals": [
+                        {
+                            "id": 1,
+                            "name": "Клик по телефону",
+                            "type": "action",
+                            "is_favorite": True,
+                        },
+                        {"id": 2, "name": "Поиск по сайту", "type": "action", "is_favorite": False},
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"counter": {"name": "Сайт", "site": "example.ru"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        catalog = await MetricaAdapter(ReadTransport(http)).catalog(client, [10])
+    assert [g["favorite"] for g in catalog[0]["goals"]] == [True, False]
