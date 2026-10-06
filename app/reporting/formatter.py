@@ -466,6 +466,70 @@ def has_signal(report, type_):
     return any(signal.type == type_ for signal in report.signals)
 
 
+def weekly_digest(reports, period, errors=(), *, title="Сводка за неделю"):
+    """Portfolio of a manager for the last complete week: one line per client with the
+    result, its price and spend, worst first, and the main risk under it."""
+    order = {"red": 0, "yellow": 1, "unknown": 2, "green": 3}
+
+    def short(key, report):
+        value = getattr(report.current, key)
+        if value is None:
+            return None
+        if key in MONEY and abs(Decimal(value)) >= 1_000_000:
+            text = number_text(Decimal(value) / 1_000_000, 1) + " млн ₽"
+        elif key in MONEY and abs(Decimal(value)) >= 10_000:
+            text = number_text(Decimal(value) / 1000, 1) + " тыс. ₽"
+        else:
+            text = value_text(key, value)
+        change_text = delta_text(report, key)
+        return f"{SHORT_NAMES[key].lower()} {text} ({change_text})"
+
+    lines = [
+        f"📅 **{title}** · {period.current.label()}",
+        f"Сравнение с неделей {period.previous.label()}",
+        "",
+    ]
+    working = [r for r in reports if r.current.spend]
+    idle = [r for r in reports if not r.current.spend]
+    for report in sorted(working, key=lambda r: (order.get(r.level, 2), -(r.current.spend or 0))):
+        kpi = main_metric(report)
+        facts = [
+            fact
+            for fact in (
+                short("conversions", report),
+                short(kpi, report) if kpi not in ("conversions", "spend") else None,
+                short("spend", report),
+            )
+            if fact
+        ]
+        lines.append(
+            f"{ICONS.get(report.level, '⚪')} **{report.client_name}** · " + " · ".join(facts)
+        )
+        risk = next(
+            (
+                s.message
+                for s in sorted(report.signals, key=lambda s: s.level != "red")
+                if s.level in ("red", "yellow")
+                and s.type not in contextual_types(report) | TABLE_SIGNALS
+                and s.type != "tracking"
+                and s.message
+            ),
+            None,
+        )
+        if risk and report.level in ("red", "yellow"):
+            lines.append(f"   ↳ {risk}")
+    if idle:
+        lines += ["", "Без расхода за неделю: " + ", ".join(r.client_name for r in idle) + "."]
+    if errors:
+        lines += ["", "Не проверены: " + "; ".join(errors[:5])]
+    lines += [
+        "",
+        "Спросите бота про любого клиента: «почему у Grand Line выросла цена заявки?» "
+        "или откройте карточку через /menu.",
+    ]
+    return redact("\n".join(lines))
+
+
 def daily_digest(results):
     """One operational digest for yesterday and the last seven completed days."""
     sections = []

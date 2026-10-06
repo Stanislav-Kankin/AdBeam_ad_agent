@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     telegram_report_chat_id: int | None = None
     schedule_enabled: bool = True
     schedule_hour: int = Field(default=10, ge=0, le=23)
+    # Cron day of week: strategies work in weekly cycles, so the digest comes on
+    # Mondays for the last complete week. "*" restores the daily digest.
+    schedule_day_of_week: str = Field(default="mon", pattern=r"^(\*|mon|tue|wed|thu|fri|sat|sun)$")
     schedule_minute: int = Field(default=0, ge=0, le=59)
     mock_schedule_interval_seconds: int = Field(default=0, ge=0)
     deepseek_api_key: SecretStr = SecretStr("")

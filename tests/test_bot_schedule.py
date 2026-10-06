@@ -484,6 +484,7 @@ async def test_schedule_admin_and_10am_timezone(runtime):
 
 
 async def test_daily_shared_service_and_idempotency_across_restart(runtime):
+    runtime.settings.schedule_day_of_week = "*"
     send = AsyncMock()
     spy = AsyncMock(wraps=runtime.checks.run_check)
     runtime.checks.run_check = spy
@@ -503,6 +504,7 @@ async def test_daily_shared_service_and_idempotency_across_restart(runtime):
 
 
 async def test_daily_model_gets_one_compact_digest(runtime):
+    runtime.settings.schedule_day_of_week = "*"
     send = AsyncMock()
     agent = AsyncMock()
     agent.explain_daily_digest.side_effect = lambda text, chat: (text, False)
@@ -512,6 +514,7 @@ async def test_daily_model_gets_one_compact_digest(runtime):
 
 
 async def test_failed_delivery_resumes_without_rerunning_analysis(runtime):
+    runtime.settings.schedule_day_of_week = "*"
     send = AsyncMock(side_effect=RuntimeError("telegram down"))
     spy = AsyncMock(wraps=runtime.checks.run_check)
     runtime.checks.run_check = spy
@@ -663,3 +666,53 @@ async def test_trend_button_sends_reading_and_chart(runtime):
     texts = [getattr(item, "text", "") or "" for item in sent]
     assert any("Тренд за полгода" in text for text in texts)
     assert any(isinstance(item, SendPhoto) and "тренд" in item.caption for item in sent)
+
+
+async def test_weekly_digest_to_team_and_each_manager(runtime):
+    await runtime.checks.repository.set_bot_user(2, True, ["west_export"], 1)
+    send = AsyncMock()
+    spy = AsyncMock(wraps=runtime.checks.run_check)
+    runtime.checks.run_check = spy
+    schedule = DailySchedule(runtime.settings, runtime.checks, send)
+    await schedule.run()
+    period = spy.call_args.args[1]
+    assert period.current.days == 7 and period.current.start.weekday() == 0
+    chats = [call.args[0] for call in send.await_args_list]
+    team = runtime.settings.telegram_report_chat_id
+    assert team in chats and 2 in chats
+    personal = "\n".join(call.args[1] for call in send.await_args_list if call.args[0] == 2)
+    assert "Ваши клиенты за неделю" in personal and "West" in personal
+    team_text = "\n".join(call.args[1] for call in send.await_args_list if call.args[0] == team)
+    assert "Сводка за неделю" in team_text
+    count = send.await_count
+    await DailySchedule(runtime.settings, runtime.checks, send).run()
+    assert send.await_count == count  # once a week, even after a restart
+
+
+async def test_admin_assigns_clients_to_a_manager(runtime):
+    from aiogram.types import CallbackQuery
+
+    await runtime.checks.repository.set_bot_user(2, True, [], 1)
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+
+        async def click(label):
+            keyboard = session.sent[-1].reply_markup.inline_keyboard
+            data = next(b.callback_data for row in keyboard for b in row if label in b.text)
+            cb = CallbackQuery(
+                id="nav",
+                from_user=User(id=1, is_bot=False, first_name="Admin"),
+                chat_instance="test",
+                message=message_update("menu").message,
+                data=data,
+            )
+            await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        await dp.feed_update(bot, message_update("/menu"))
+        await click("Пользователи")
+        await click("Клиенты (0)")
+        assert "Отмечено: 0" in session.sent[-1].text
+        await click("West")
+        assert "Отмечено: 1" in session.sent[-1].text
+    assert (await runtime.checks.repository.bot_users())[2]["client_ids"] == ["west_export"]

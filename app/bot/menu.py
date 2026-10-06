@@ -226,7 +226,16 @@ def install_menu(router, runtime, launch, launch_chart):
                     text += f"\n🔐 {person(uid, members)} — администратор (.env)"
                 else:
                     enabled = members.get(uid, {}).get("enabled", True)
-                    text += f"\n{'✅' if enabled else '⛔'} {person(uid, members)}"
+                    count = len(members.get(uid, {}).get("client_ids") or [])
+                    text += f"\n{'✅' if enabled else '⛔'} {person(uid, members)}" + (
+                        f" · клиентов: {count}" if uid in members else ""
+                    )
+                    if enabled and uid in members:
+                        row(
+                            f"📁 Клиенты ({count}) · {person(uid, members)}"[:60],
+                            "member_clients",
+                            member_id=uid,
+                        )
                     row(
                         (("Удалить " if enabled else "Добавить снова ") + person(uid, members))[
                             :60
@@ -242,6 +251,42 @@ def install_menu(router, runtime, launch, launch_chart):
                 row("← Назад", "users", page=page - 1)
             if page + 1 < pages:
                 row("Вперёд →", "users", page=page + 1)
+        elif screen == "member_clients":
+            if user not in runtime.settings.telegram_admin_user_ids:
+                raise PermissionError
+            members = await runtime.checks.repository.bot_users()
+            member = members.get(client_id)
+            if member is None:
+                raise PermissionError
+            mine = set(member["client_ids"] or [])
+            pages = max(1, (len(clients) + PAGE_SIZE - 1) // PAGE_SIZE)
+            page = min(max(page, 0), pages - 1)
+            text = badge + (
+                f"Клиенты · {person(client_id, members)}\n"
+                f"Отмечено: {len(mine)} из {len(clients)} · страница {page + 1} из {pages}\n"
+                "Отмеченные клиенты видны этому человеку в личке и приходят ему "
+                "в сводке по понедельникам."
+            )
+            for client in clients[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]:
+                row(
+                    ("✅ " if client.id in mine else "▫️ ") + client.name[:90],
+                    "member_toggle_client",
+                    member_id=client_id,
+                    target=client.id,
+                    page=page,
+                )
+            navigation = []
+            if page:
+                navigation.append(
+                    button("← Назад", "member_clients", member_id=client_id, page=page - 1)
+                )
+            if page + 1 < pages:
+                navigation.append(
+                    button("Вперёд →", "member_clients", member_id=client_id, page=page + 1)
+                )
+            if navigation:
+                rows.append(navigation)
+            row("← Пользователи", "users")
         elif screen == "clients":
             pages = max(1, (len(clients) + PAGE_SIZE - 1) // PAGE_SIZE)
             page = min(max(page, 0), pages - 1)
@@ -590,6 +635,8 @@ def install_menu(router, runtime, launch, launch_chart):
                 "member_add",
                 "member_revoke",
                 "member_restore",
+                "member_clients",
+                "member_toggle_client",
                 "refresh",
             )
             configuration = action in (
@@ -622,6 +669,31 @@ def install_menu(router, runtime, launch, launch_chart):
             await callback.message.answer(
                 "Пришлите числовой Telegram ID пользователя. "
                 "Он получит доступ в личном чате ко всем клиентам, видимым вам здесь. /cancel — отмена."
+            )
+        elif action == "member_clients":
+            await show(
+                callback.message,
+                user,
+                screen="member_clients",
+                client_id=kwargs["member_id"],
+                page=kwargs.get("page", 0),
+                edit=True,
+            )
+        elif action == "member_toggle_client":
+            uid = kwargs["member_id"]
+            member = (await runtime.checks.repository.bot_users()).get(uid)
+            if member is not None:
+                mine = set(member["client_ids"] or []) ^ {kwargs["target"]}
+                await runtime.checks.repository.set_bot_user(
+                    uid, member["enabled"], sorted(mine), user
+                )
+            await show(
+                callback.message,
+                user,
+                screen="member_clients",
+                client_id=uid,
+                page=kwargs.get("page", 0),
+                edit=True,
             )
         elif action in ("member_revoke", "member_restore"):
             uid = kwargs["member_id"]

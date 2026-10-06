@@ -7,9 +7,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.analytics.periods import MOSCOW, make_period, today_moscow
+from app.analytics.periods import MOSCOW, AnalysisPeriod, DateRange, make_period, today_moscow
 from app.domain.reports import CheckMode, TriggerSource
-from app.reporting.formatter import daily_digest, split_message
+from app.reporting.formatter import daily_digest, split_message, weekly_digest
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ class DailySchedule:
             IntervalTrigger(seconds=interval, timezone=MOSCOW)
             if interval
             else CronTrigger(
+                day_of_week=self.settings.schedule_day_of_week,
                 hour=self.settings.schedule_hour,
                 minute=self.settings.schedule_minute,
                 timezone=MOSCOW,
@@ -131,8 +132,68 @@ class DailySchedule:
             second=0,
             microsecond=0,
         )
-        if now >= due:
+        if now >= due and (not self.weekly or now.strftime("%a").lower() == self.day):
             await self.run()
+
+    @property
+    def day(self):
+        return self.settings.schedule_day_of_week
+
+    @property
+    def weekly(self):
+        return self.day != "*" and not self.settings.mock_schedule_interval_seconds
+
+    @staticmethod
+    def last_week():
+        today = today_moscow()
+        sunday = today - timedelta(days=today.weekday() + 1)
+        monday = sunday - timedelta(days=6)
+        return AnalysisPeriod(
+            current=DateRange(start=monday, end=sunday),
+            previous=DateRange(start=monday - timedelta(days=7), end=sunday - timedelta(days=7)),
+        )
+
+    async def deliver(self, key, chat, build):
+        """Send once per key; a failed send resumes from the last delivered part."""
+        repo = self.checks.repository
+        delivery = await repo.delivery(key)
+        if delivery and delivery.status == "sent":
+            return
+        if not delivery:
+            await repo.save_delivery(key, parts=split_message(await build()))
+            delivery = await repo.delivery(key)
+        for index in range(delivery.next_part, len(delivery.parts)):
+            await self.send(chat, delivery.parts[index])
+            await repo.save_delivery(key, next_part=index + 1)
+        await repo.save_delivery(key, next_part=len(delivery.parts), status="sent")
+
+    async def run_weekly(self, chat, ids):
+        period = self.last_week()
+        reports, _ = await self.checks.run_check(
+            ids, period, CheckMode.STANDARD, TriggerSource.SCHEDULE, chat_id=chat
+        )
+        failed = [cid for cid in ids if cid not in {report.client_id for report in reports}]
+        week = str(period.current.start)
+
+        async def team():
+            return weekly_digest(reports, period, failed)
+
+        await self.deliver(f"{self.settings.app_mode}:{chat}:week:{week}", chat, team)
+        # Each manager gets their own clients in a private chat.
+        admins = set(self.settings.telegram_admin_user_ids)
+        for uid, member in (await self.checks.repository.bot_users()).items():
+            mine = [r for r in reports if r.client_id in set(member["client_ids"])]
+            if not member["enabled"] or uid in admins or not mine:
+                continue
+
+            async def personal(mine=mine):
+                return weekly_digest(mine, period, title="Ваши клиенты за неделю")
+
+            try:
+                await self.deliver(f"{self.settings.app_mode}:{uid}:week:{week}", uid, personal)
+            except Exception as exc:
+                # The person may not have opened the bot yet; others still get theirs.
+                logger.warning("Personal digest failed user=%s (%s)", uid, type(exc).__name__)
 
     async def run(self):
         async with self.lock:
@@ -140,10 +201,19 @@ class DailySchedule:
             if chat not in self.checks.registry.allowed_chats:
                 logger.error("Scheduled delivery denied: chat not allowed")
                 return
+            ids = [c.id for c in self.checks.registry.visible(chat)]
+            if self.weekly:
+                try:
+                    await self.run_weekly(chat, ids)
+                except Exception as exc:
+                    logger.error(
+                        "Weekly digest failed (%s); pending delivery retained",
+                        type(exc).__name__,
+                    )
+                return
             date_key = str(today_moscow())
             if self.settings.mock_schedule_interval_seconds:
                 date_key = datetime.now(MOSCOW).isoformat()
-            ids = [c.id for c in self.checks.registry.visible(chat)]
             scope = hashlib.sha256(",".join(sorted(ids)).encode()).hexdigest()[:12]
             key = f"{self.settings.app_mode}:{chat}:{date_key}:{scope}"
             repo = self.checks.repository
@@ -197,8 +267,10 @@ class DailySchedule:
         job = self.scheduler.get_job("daily") if self.scheduler.running else None
         next_run = job.next_run_time.isoformat() if job and job.next_run_time else "не запланирован"
         return (
-            f"Ежедневная проверка: {'включена' if settings.schedule_enabled else 'выключена'}\n"
+            f"Сводка: {'включена' if settings.schedule_enabled else 'выключена'}, "
+            f"{'по понедельникам за прошлую неделю' if self.day == 'mon' else 'ежедневно' if self.day == '*' else 'день ' + self.day}\n"
             f"Время: {settings.schedule_hour:02}:{settings.schedule_minute:02} Europe/Moscow\n"
+            "Проджектам — их клиенты в личку (закрепление: «Пользователи» → «Клиенты»).\n"
             f"Чат доставки: {settings.telegram_report_chat_id}\n"
             f"Последний запуск: {last.started_at.isoformat() + ' (' + last.status + ')' if last else 'не было'}\n"
             f"Следующий запуск: {next_run}\n"
