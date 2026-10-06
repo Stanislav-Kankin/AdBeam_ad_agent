@@ -168,10 +168,15 @@ async def test_single_client_check_offers_on_demand_technical_details(runtime):
             for item in session.sent
             if isinstance(item, SendMessage) and item.text == "Дополнительные данные"
         )
-        assert offer.reply_markup.inline_keyboard[0][0].text == "📈 Кампании"
-        assert offer.reply_markup.inline_keyboard[1][0].text == "👥 Аудитория"
-        assert offer.reply_markup.inline_keyboard[2][0].text == "⚙️ Технические данные"
-        data = offer.reply_markup.inline_keyboard[2][0].callback_data
+        labels = [row[0].text for row in offer.reply_markup.inline_keyboard]
+        assert labels[:3] == [
+            "📊 Тренд за полгода",
+            "👥 Аудитория",
+            "📋 Кампании: главные изменения",
+        ]
+        # User 1 is an admin, so the technical view is offered last.
+        assert offer.reply_markup.inline_keyboard[3][0].text == "⚙️ Технические данные"
+        data = offer.reply_markup.inline_keyboard[3][0].callback_data
         callback = CallbackQuery(
             id="details",
             from_user=User(id=1, is_bot=False, first_name="User"),
@@ -226,7 +231,11 @@ async def test_campaigns_view_renders_markdown_not_asterisks(runtime):
             from_user=User(id=1, is_bot=False, first_name="User"),
             chat_instance="test",
             message=message_update("details").message,
-            data=offer.reply_markup.inline_keyboard[0][0].callback_data,
+            data=next(
+                row[0].callback_data
+                for row in offer.reply_markup.inline_keyboard
+                if "Кампании" in row[0].text
+            ),
         )
         before = len(session.sent)
         await dp.feed_update(bot, Update(update_id=2, callback_query=callback))
@@ -278,7 +287,11 @@ async def test_group_topic_buttons_reply_in_the_same_topic(runtime):
             from_user=User(id=1, is_bot=False, first_name="User"),
             chat_instance="test",
             message=topic_message("Дополнительные данные", 99),
-            data=offer.reply_markup.inline_keyboard[0][0].callback_data,
+            data=next(
+                row[0].callback_data
+                for row in offer.reply_markup.inline_keyboard
+                if "Кампании" in row[0].text
+            ),
         )
         await dp.feed_update(bot, Update(update_id=2, callback_query=callback))
 
@@ -611,3 +624,42 @@ async def test_added_user_configures_clients_and_shows_up_by_name(runtime):
         assert "Света @sveta_pm · 2" in session.sent[-1].text
     stored = (await runtime.checks.repository.bot_users())[2]
     assert stored["username"] == "sveta_pm"
+
+
+async def test_trend_button_sends_reading_and_chart(runtime):
+    from aiogram.types import CallbackQuery
+
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+        await dp.feed_update(bot, message_update('/check "West Экспорт" 7d'))
+        await runtime.jobs.close()
+        offer = next(
+            item
+            for item in session.sent
+            if isinstance(item, SendMessage) and item.text == "Дополнительные данные"
+        )
+        data = next(
+            row[0].callback_data
+            for row in offer.reply_markup.inline_keyboard
+            if "Тренд" in row[0].text
+        )
+        before = len(session.sent)
+        await dp.feed_update(
+            bot,
+            Update(
+                update_id=2,
+                callback_query=CallbackQuery(
+                    id="trend",
+                    from_user=User(id=1, is_bot=False, first_name="User"),
+                    chat_instance="test",
+                    message=message_update("details").message,
+                    data=data,
+                ),
+            ),
+        )
+        await runtime.jobs.close()
+    sent = session.sent[before:]
+    texts = [getattr(item, "text", "") or "" for item in sent]
+    assert any("Тренд за полгода" in text for text in texts)
+    assert any(isinstance(item, SendPhoto) and "тренд" in item.caption for item in sent)

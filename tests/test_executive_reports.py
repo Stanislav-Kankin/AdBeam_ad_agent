@@ -304,3 +304,31 @@ async def test_metrica_campaign_report_keeps_direct_campaign_without_visits(
     assert set(by_id) == {"101", "102"}
     assert by_id["102"]["current"] == {}
     assert by_id["102"]["direct"]["current"]["spend"] is not None
+
+
+async def test_card_shows_traffic_quality_and_at_most_three_risks(runtime, client):
+    report = await runtime.checks.analyze(client, make_period("7d"), CheckMode.STANDARD)
+    report.metrica_current.update(bounce_rate=24.5, page_depth=3.2, avg_visit_duration_seconds=145)
+    report.metrica_previous.update(bounce_rate=18.5, page_depth=3.2, avg_visit_duration_seconds=150)
+    text = card(report)
+    assert "**Качество трафика сайта** (Метрика)" in text
+    assert "Отказы: **+6 п.п.** · 24,5% / было 18,5%" in text
+    assert "Время на сайте: **−3,3%** · 2:25 / было 2:30" in text
+    assert "CPC:" not in text and "CTR:" not in text
+    risks = text.split("Требует внимания**")[1].split("\n\n")[0].strip().splitlines()
+    assert len(risks) <= 3
+
+
+async def test_half_year_trend_reads_weeks_and_renders(runtime, client):
+    from datetime import date
+
+    from app.analytics.trend import complete_weeks, load_trend, summary
+    from app.reporting.charts import render_trend
+
+    start, end = complete_weeks(date(2026, 10, 6))
+    assert (start.weekday(), end.weekday(), (end - start).days + 1) == (0, 6, 26 * 7)
+    trend = await load_trend(runtime.checks, client)
+    assert len(trend["weeks"]) == 26
+    text = summary(trend)
+    assert "Последние 4 недели к предыдущим 4" in text and "За полгода" in text
+    assert render_trend(client.name, trend)[:4] == b"\x89PNG"

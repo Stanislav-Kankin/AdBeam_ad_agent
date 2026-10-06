@@ -242,3 +242,85 @@ def render_dynamics(client_name, period, current: DirectData, previous: DirectDa
     output = BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
+
+
+def render_trend(client_name, trend) -> bytes:
+    """Half-year by complete weeks: spend, conversions, CPA and ad-traffic bounce rate."""
+    image = Image.new("RGB", (WIDTH, HEIGHT), "#F1F5F9")
+    draw = ImageDraw.Draw(image)
+    draw.text((65, 45), client_name, font=_font(42, bold=True), fill=INK)
+    draw.text(
+        (65, 100),
+        f"Тренд за полгода по неделям · {trend['start']:%d.%m.%Y}–{trend['end']:%d.%m.%Y}",
+        font=_font(24),
+        fill=MUTED,
+    )
+    weeks = trend["weeks"]
+    dates = [week["start"] for week in weeks]
+    metrics = [calculate(week["totals"]) for week in weeks]
+    recent = calculate(aggregate([w["totals"] for w in weeks[-4:]]))
+    before = calculate(aggregate([w["totals"] for w in weeks[-8:-4]]))
+    cards = (
+        ("Расход, 4 нед.", recent.spend, before.spend, True, None),
+        ("Конверсии, 4 нед.", recent.conversions, before.conversions, False, False),
+        ("CPA, 4 нед.", recent.cpa, before.cpa, True, True),
+    )
+    card_width = 470
+    for index, (label, current_value, previous_value, money, lower_is_better) in enumerate(cards):
+        x = 65 + index * (card_width + 25)
+        draw.rounded_rectangle((x, 155, x + card_width, 290), radius=24, fill=CARD)
+        draw.text((x + 24, 178), label, font=_font(20), fill=MUTED)
+        draw.text(
+            (x + 24, 215), _short(current_value, money=money), font=_font(31, bold=True), fill=INK
+        )
+        delta, color = _delta(current_value, previous_value, lower_is_better=lower_is_better)
+        draw.text((x + 330, 227), delta, font=_font(20, bold=True), fill=color)
+    _panel(
+        draw,
+        (65, 330, 790, 650),
+        "Расход по неделям, ₽",
+        [m.spend for m in metrics],
+        [],
+        dates,
+        money=True,
+        x_label="Недели",
+    )
+    _panel(
+        draw,
+        (815, 330, 1535, 650),
+        "Конверсии по неделям, шт.",
+        [m.conversions for m in metrics],
+        [],
+        dates,
+        x_label="Недели",
+    )
+    _panel(
+        draw,
+        (65, 680, 790, 1010),
+        "CPA по неделям, ₽",
+        [m.cpa for m in metrics],
+        [],
+        dates,
+        money=True,
+        x_label="Недели",
+    )
+    quality = trend.get("quality") or {}
+    bounce = [(quality.get(str(day)) or {}).get("bounce_rate") for day in dates]
+    _panel(
+        draw,
+        (815, 680, 1535, 1010),
+        "Отказы рекламного трафика, %" if quality else "Отказы: нет доступа к Метрике",
+        [Decimal(str(v)) if v is not None else None for v in bounce],
+        [],
+        dates,
+        x_label="Недели",
+    )
+    draw.text(
+        (65, 1040),
+        "Полные недели пн–вс. Карточки: последние 4 недели к предыдущим 4. Источники: Директ, Метрика.",
+        font=_font(19),
+        fill=MUTED,
+    )
+    buffer = BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()

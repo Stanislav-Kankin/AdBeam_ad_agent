@@ -128,8 +128,19 @@ SHORT_NAMES = {
 }
 MONEY = ("spend", "cpc", "cpa", "revenue")
 POINTS = ("ctr", "cr", "drr")
-CARD_METRICS = ("spend", "conversions", "cpa", "clicks", "cpc", "ctr", "cr", "drr")
-TABLE_SIGNALS = frozenset({"spend_change", "cpc_change", "cr_drop"})
+# A manager reads volume, result and its price; CPC and CTR stay in the technical view.
+CARD_METRICS = ("spend", "conversions", "cpa", "drr", "clicks", "cr")
+TABLE_SIGNALS = frozenset({"spend_change", "cr_drop"})
+KPI_SIGNALS = frozenset(
+    {
+        "cpa_change",
+        "cpa_high",
+        "cpa_above_target",
+        "drr_high",
+        "spend_without_conversions",
+        "no_active_campaigns",
+    }
+)
 
 
 def number_text(value, decimals):
@@ -282,6 +293,48 @@ def conclusion(report):
     return text
 
 
+def quality_lines(report):
+    """Bounce rate, depth and time on site: indirect signs of traffic quality that
+    Dima asked to show to managers next to the conversions."""
+    now, was = report.metrica_current or {}, report.metrica_previous or {}
+    if now.get("bounce_rate") is None:
+        return []
+
+    def duration(value):
+        return f"{int(value) // 60}:{int(value) % 60:02d}" if value is not None else "—"
+
+    def shift(key, *, points=False):
+        current, previous = now.get(key), was.get(key)
+        if current is None or previous is None:
+            return "нет базы"
+        if points:
+            delta = Decimal(str(current)) - Decimal(str(previous))
+            return "стабильно" if abs(delta) < 1 else f"{signed(delta, 1)} п.п."
+        if not previous:
+            return "нет базы"
+        delta = (Decimal(str(current)) - Decimal(str(previous))) / Decimal(str(previous)) * 100
+        return "стабильно" if abs(delta) < 3 else f"{signed(delta)}%"
+
+    lines = ["", "**Качество трафика сайта** (Метрика)"]
+    lines.append(
+        f"Отказы: **{shift('bounce_rate', points=True)}** · "
+        f"{number_text(now['bounce_rate'], 1)}% / было "
+        f"{number_text(was['bounce_rate'], 1) + '%' if was.get('bounce_rate') is not None else '—'}"
+    )
+    if now.get("page_depth") is not None:
+        lines.append(
+            f"Глубина: **{shift('page_depth')}** · {number_text(now['page_depth'], 1)} стр. / "
+            f"было {number_text(was['page_depth'], 1) if was.get('page_depth') is not None else '—'}"
+        )
+    if now.get("avg_visit_duration_seconds") is not None:
+        lines.append(
+            f"Время на сайте: **{shift('avg_visit_duration_seconds')}** · "
+            f"{duration(now['avg_visit_duration_seconds'])} / было "
+            f"{duration(was.get('avg_visit_duration_seconds'))}"
+        )
+    return lines
+
+
 def card(report: ClientReport, summary: str | None = None) -> str:
     """Main single-client answer: status, KPI, key deltas, concrete risks, data line."""
     kpi = main_metric(report)
@@ -310,6 +363,7 @@ def card(report: ClientReport, summary: str | None = None) -> str:
     if metrics:
         lines += ["", "**Показатели** · изменение · сейчас / было"]
         lines += [metric_line(report, key) for key in metrics]
+    lines += quality_lines(report)
 
     # Account-level volume shifts are already bold in the metrics table above.
     contextual = contextual_types(report) | TABLE_SIGNALS
@@ -320,14 +374,20 @@ def card(report: ClientReport, summary: str | None = None) -> str:
     # then waste. Campaigns without conversions collapse into one line with amounts.
     waste = [s for s in alerts if s.type == "campaign_without_conversions"]
     account = [s for s in alerts if s.type != "campaign_without_conversions"]
-    risks = [s.message for s in sorted(account, key=lambda s: s.level != "red")]
+    # Only three fit a manager's card: red first, then the project KPI and where it
+    # goes wrong (expensive campaigns, spend without conversions), then the rest
+    # (CPC, budget pacing).
+    kpi_first = [s for s in account if s.level == "red" or s.type in KPI_SIGNALS]
+    rest = [s for s in account if s not in kpi_first]
+    risks = [s.message for s in sorted(kpi_first, key=lambda s: s.level != "red")]
     risks += expensive_campaigns(report)
     if waste:
         risks.append(waste_line(report, waste))
     tracking = next((s for s in report.signals if s.type == "tracking"), None)
     if tracking:
         risks += tracking.actual.get("reasons", [])[:1]
-    risks = list(dict.fromkeys(risks))[:5]
+    risks += [s.message for s in rest]
+    risks = list(dict.fromkeys(risks))[:3]
     lines += ["", "**⚠️ Требует внимания**" if risks else "**Рисков не найдено**"]
     lines += [f"{i}. {text}" for i, text in enumerate(risks, 1)]
     context = [

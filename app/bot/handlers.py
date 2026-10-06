@@ -10,6 +10,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 
 from app.analytics.periods import AnalysisPeriod, make_period
 from app.analytics.progress import progress_state
+from app.analytics.trend import load_trend, summary
 from app.bot.callbacks import answer_callback
 from app.bot.commands import HELP, parse_command
 from app.bot.markdown import markdown_parts
@@ -18,7 +19,7 @@ from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities, retry_telegram
 from app.domain.reports import CheckMode, ClientReport, TriggerSource
 from app.reporting.balance import balance_text
-from app.reporting.charts import render_dynamics
+from app.reporting.charts import render_dynamics, render_trend
 from app.reporting.formatter import audience_report, campaigns_view, detailed, split_message
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,7 @@ def build_dispatcher(runtime):
             monotonic(),
             message.chat.id,
             user_id,
-            campaigns_view(reports[0]),
+            campaigns_view(reports[0], limit=5),
             detailed(reports[0]),
             reports[0].client_id,
             reports[0].period.model_dump(mode="json"),
@@ -101,8 +102,8 @@ def build_dispatcher(runtime):
                         inline_keyboard=[
                             [
                                 InlineKeyboardButton(
-                                    text="📈 Кампании",
-                                    callback_data=f"details:{token}:specialist",
+                                    text="📊 Тренд за полгода",
+                                    callback_data=f"details:{token}:trend",
                                 )
                             ],
                             [
@@ -113,11 +114,24 @@ def build_dispatcher(runtime):
                             ],
                             [
                                 InlineKeyboardButton(
-                                    text="⚙️ Технические данные",
-                                    callback_data=f"details:{token}:technical",
+                                    text="📋 Кампании: главные изменения",
+                                    callback_data=f"details:{token}:specialist",
                                 )
                             ],
                         ]
+                        # Raw technical detail is for admins; managers do not need it.
+                        + (
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        text="⚙️ Технические данные",
+                                        callback_data=f"details:{token}:technical",
+                                    )
+                                ]
+                            ]
+                            if user_id in runtime.settings.telegram_admin_user_ids
+                            else []
+                        )
                     ),
                     request_timeout=15,
                 )
@@ -138,7 +152,7 @@ def build_dispatcher(runtime):
                 monotonic() - created > 900
                 or chat_id != callback.message.chat.id
                 or user_id != callback.from_user.id
-                or view not in ("specialist", "technical", "audience")
+                or view not in ("specialist", "technical", "audience", "trend")
             ):
                 raise ValueError
         except (KeyError, ValueError):
@@ -147,6 +161,39 @@ def build_dispatcher(runtime):
             )
             return
         await answer_callback(callback)
+        if view == "trend":
+            presentation = ReportMessage(callback.message)
+
+            async def trend_work():
+                state = {"stage": "собираю полгода по неделям из Директа и Метрики"}
+                token = progress_state.set(state)
+                try:
+                    await presentation.start(state)
+                    client = runtime.registry.require(chat_id, client_id)
+                    trend = await load_trend(runtime.checks, client)
+                    image = await asyncio.to_thread(render_trend, client_label(client), trend)
+                    await presentation.finish(summary(trend))
+                    await retry_telegram(
+                        lambda: callback.message.bot.send_photo(
+                            chat_id,
+                            BufferedInputFile(image, filename="adbeam-trend.png"),
+                            caption=f"📊 {client_label(client)} · тренд за полгода",
+                            message_thread_id=topic_of(callback.message),
+                            request_timeout=30,
+                        )
+                    )
+                finally:
+                    await presentation.stop()
+                    progress_state.reset(token)
+
+            async def trend_failed():
+                await presentation.finish(
+                    "Не удалось собрать тренд за полгода. Ошибка записана в журнал."
+                )
+
+            if not runtime.jobs.start((chat_id, user_id), trend_work, trend_failed):
+                await callback.message.answer("Другой запрос уже выполняется. Попробуйте позже.")
+            return
         if view == "audience":
             presentation = ReportMessage(callback.message)
 
