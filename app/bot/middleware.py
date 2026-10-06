@@ -24,6 +24,20 @@ class AccessMiddleware(BaseMiddleware):
                 if value["enabled"] and uid not in self.admins
             }
             user = event.from_user.id
+            names = getattr(self.registry, "user_names", None)
+            if names is None:
+                names = self.registry.user_names = {}
+            seen = (event.from_user.username, event.from_user.full_name)
+            names[user] = seen
+            if (
+                user in members
+                and (
+                    members[user].get("username"),
+                    members[user].get("full_name"),
+                )
+                != seen
+            ):
+                await self.repository.remember_user_name(user, *seen)
             if user not in self.admins and user in members:
                 if not members[user]["enabled"]:
                     return None

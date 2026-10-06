@@ -63,7 +63,23 @@ class Repository:
                     .order_by(BotUser.user_id)
                 )
             ).all()
-        return {int(r.user_id): {"enabled": r.enabled, "client_ids": r.client_ids} for r in rows}
+        return {
+            int(r.user_id): {
+                "enabled": r.enabled,
+                "client_ids": r.client_ids,
+                "username": r.username,
+                "full_name": r.full_name,
+            }
+            for r in rows
+        }
+
+    async def remember_user_name(self, user_id, username, full_name):
+        """Keep the Telegram name of an existing bot user up to date."""
+        async with self.write_session() as session:
+            row = await session.get(BotUser, (self.app_mode, str(user_id)))
+            if row is not None:
+                row.username = (username or None) and username[:64]
+                row.full_name = (full_name or None) and full_name[:128]
 
     async def set_bot_user(self, user_id, enabled, client_ids, actor):
         async with self.write_session() as session:

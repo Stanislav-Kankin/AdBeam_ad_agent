@@ -561,3 +561,53 @@ async def test_group_menu_is_shared_and_survives_a_newer_menu(runtime):
         await dp.feed_update(bot, Update(update_id=2, callback_query=callback))
         assert "Страница" in session.sent[-1].text or "Клиент" in session.sent[-1].text
         assert not getattr(session.sent[-1], "show_alert", False)
+
+
+async def test_added_user_configures_clients_and_shows_up_by_name(runtime):
+    from aiogram.types import CallbackQuery
+
+    await runtime.checks.repository.set_bot_user(2, True, ["west_export"], 1)
+    session = FakeTelegram()
+    sveta = User(id=2, is_bot=False, first_name="Света", username="sveta_pm")
+
+    def private(text, who):
+        return Update(
+            update_id=1,
+            message=Message(
+                message_id=1,
+                date=datetime.now(UTC),
+                chat=Chat(id=who.id, type="private"),
+                from_user=who,
+                text=text,
+            ),
+        )
+
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        dp = build_dispatcher(runtime)
+
+        async def click(label, who, chat_id):
+            keyboard = session.sent[-1].reply_markup.inline_keyboard
+            data = next(b.callback_data for row in keyboard for b in row if label in b.text)
+            cb = CallbackQuery(
+                id="nav",
+                from_user=who,
+                chat_instance="test",
+                message=private("menu", User(id=chat_id, is_bot=False, first_name="U")).message,
+                data=data,
+            )
+            await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        await dp.feed_update(bot, private("/menu", sveta))
+        await click("Клиенты", sveta, 2)
+        await click("West", sveta, 2)
+        labels = [b.text for row in session.sent[-1].reply_markup.inline_keyboard for b in row]
+        assert any("KPI проекта" in label for label in labels)
+        await click("KPI проекта", sveta, 2)
+        assert "KPI проекта" in session.sent[-1].text
+
+        admin = User(id=1, is_bot=False, first_name="Admin")
+        await dp.feed_update(bot, message_update("/menu"))
+        await click("Пользователи", admin, 123456789)
+        assert "Света @sveta_pm · 2" in session.sent[-1].text
+    stored = (await runtime.checks.repository.bot_users())[2]
+    assert stored["username"] == "sveta_pm"

@@ -19,6 +19,8 @@ class BotUser(Base):
     user_id: Mapped[str] = mapped_column(String(30), primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean)
     client_ids: Mapped[list] = mapped_column(JSON, default=list)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     updated_by: Mapped[str] = mapped_column(String(30))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 

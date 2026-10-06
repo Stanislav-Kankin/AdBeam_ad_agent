@@ -32,7 +32,7 @@ TARGET_FIELDS = {"target_cpa": "целевой CPA, ₽", "target_drr": "цел�
 
 
 def parse_exclusions(value):
-    """ "бренд, brand" -> ["бренд", "brand"]; "0", "-" or "нет" clears the list."""
+    """Words from "бренд, brand"; "0", "-" or "нет" clears the list."""
     text = value.strip()
     if text.casefold() in ("0", "-", "нет", "—"):
         return []
@@ -58,6 +58,20 @@ MENU_TTL = 6 * 3600
 
 
 def install_menu(router, runtime, launch, launch_chart):
+    def can_configure(user):
+        """Admins and users added in the bot may set goals, counters and KPI."""
+        return user in runtime.settings.telegram_admin_user_ids or user in getattr(
+            runtime.registry, "user_grants", {}
+        )
+
+    def person(uid, members):
+        stored = members.get(uid, {})
+        seen = getattr(runtime.registry, "user_names", {}).get(uid, (None, None))
+        username = stored.get("username") or seen[0]
+        name = stored.get("full_name") or seen[1]
+        label = " ".join(part for part in (name, f"@{username}" if username else None) if part)
+        return f"{label} · {uid}" if label else f"{uid} (имя появится, когда напишет боту)"
+
     actions = {}
     awaiting_user = {}
     awaiting_target = {}
@@ -77,7 +91,7 @@ def install_menu(router, runtime, launch, launch_chart):
     async def target_input(message):
         key = (message.chat.id, message.from_user.id)
         started, client_id, field = awaiting_target.pop(key)
-        if message.from_user.id not in runtime.settings.telegram_admin_user_ids:
+        if not can_configure(message.from_user.id):
             return
         if message.text.strip() in ("/cancel", "/menu", "/start"):
             await show(message, message.from_user.id)
@@ -133,9 +147,19 @@ def install_menu(router, runtime, launch, launch_chart):
         else:
             ids = [c.id for c in runtime.registry.visible(message.chat.id)]
             await runtime.checks.repository.set_bot_user(uid, True, ids, message.from_user.id)
+            try:
+                # Works once the person has opened the bot; otherwise the name is
+                # filled in on their first message.
+                chat = await message.bot.get_chat(uid)
+                await runtime.checks.repository.remember_user_name(
+                    uid, chat.username, chat.full_name
+                )
+            except Exception:
+                pass
             await message.answer(
                 f"Пользователь {uid} добавлен. Доступных клиентов: {len(ids)}. "
-                "Теперь он может открыть личный чат с ботом и отправить /start."
+                "Теперь он может открыть личный чат с ботом и отправить /start. "
+                "Ему доступны отчёты и настройка целей, счётчиков и KPI своих клиентов."
             )
         await show(message, message.from_user.id, screen="users")
 
@@ -199,12 +223,14 @@ def install_menu(router, runtime, launch, launch_chart):
             )
             for uid in ids[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]:
                 if uid in runtime.settings.telegram_admin_user_ids:
-                    text += f"\n🔐 {uid} — администратор (.env)"
+                    text += f"\n🔐 {person(uid, members)} — администратор (.env)"
                 else:
                     enabled = members.get(uid, {}).get("enabled", True)
-                    text += f"\n{'✅' if enabled else '⛔'} {uid}"
+                    text += f"\n{'✅' if enabled else '⛔'} {person(uid, members)}"
                     row(
-                        ("Удалить " if enabled else "Добавить снова ") + str(uid),
+                        (("Удалить " if enabled else "Добавить снова ") + person(uid, members))[
+                            :60
+                        ],
                         "member_revoke" if enabled else "member_restore",
                         member_id=uid,
                         page=page,
@@ -261,13 +287,9 @@ def install_menu(router, runtime, launch, launch_chart):
                     row(
                         "📈 График динамики", "period", client_id=client_id, page=page, mode="chart"
                     )
-                if (
-                    client_id
-                    and runtime.inventory
-                    and user in runtime.settings.telegram_admin_user_ids
-                ):
+                if client_id and runtime.inventory and can_configure(user):
                     row("⚙️ Данные и цели", "data", client_id=client_id, page=page)
-                if client_id and user in runtime.settings.telegram_admin_user_ids:
+                if client_id and can_configure(user):
                     row("🎯 KPI проекта", "kpi", client_id=client_id, page=page)
             else:
                 text += "\nВыберите период завершённых дней (МСК)."
@@ -279,11 +301,11 @@ def install_menu(router, runtime, launch, launch_chart):
             text = badge + await describe_data(runtime, chat, client_id)
             row("🔄 Обновить экран", "status", client_id=client_id, page=page)
             row("🔎 Проверить клиента", "period", client_id=client_id, mode=CheckMode.STANDARD)
-            if runtime.inventory and user in runtime.settings.telegram_admin_user_ids:
+            if runtime.inventory and can_configure(user):
                 row("⚙️ Данные и цели", "data", client_id=client_id)
             row("← К отчёту", "report", client_id=client_id, page=page)
         elif screen == "data":
-            if user not in runtime.settings.telegram_admin_user_ids or not runtime.inventory:
+            if not can_configure(user) or not runtime.inventory:
                 raise PermissionError
             client = runtime.registry.require(chat, client_id)
             counters = await runtime.checks.repository.client_counters(client_id)
@@ -310,7 +332,7 @@ def install_menu(router, runtime, launch, launch_chart):
                 row("🎯 Выбрать основные цели", "goals", client_id=client_id, page=0)
             row("← К отчёту", "report", client_id=client_id, page=page)
         elif screen == "counters":
-            if user not in runtime.settings.telegram_admin_user_ids or not runtime.inventory:
+            if not can_configure(user) or not runtime.inventory:
                 raise PermissionError
             include_all = bool(mode == "all")
             counters = await runtime.checks.repository.client_counters(
@@ -364,7 +386,7 @@ def install_menu(router, runtime, launch, launch_chart):
                 row("📚 Все доступные", "counters", client_id=client_id, page=0, mode="all")
             row("← Настройка данных", "data", client_id=client_id)
         elif screen == "goals":
-            if user not in runtime.settings.telegram_admin_user_ids or not runtime.inventory:
+            if not can_configure(user) or not runtime.inventory:
                 raise PermissionError
             client = runtime.registry.require(chat, client_id)
             counters = await runtime.checks.repository.client_counters(client_id)
@@ -435,7 +457,7 @@ def install_menu(router, runtime, launch, launch_chart):
                 rows.append(navigation)
             row("← Настройка данных", "data", client_id=client_id)
         elif screen == "kpi":
-            if user not in runtime.settings.telegram_admin_user_ids:
+            if not can_configure(user):
                 raise PermissionError
             client = runtime.registry.require(chat, client_id)
             targets = client.targets
@@ -562,29 +584,30 @@ def install_menu(router, runtime, launch, launch_chart):
             client_id = kwargs.get("client_id")
             if client_id:
                 runtime.registry.require(chat, client_id)
-            if (
-                action
-                in (
-                    "schedule",
-                    "users",
-                    "member_add",
-                    "member_revoke",
-                    "member_restore",
-                    "refresh",
-                    "data",
-                    "refresh_data",
-                    "counters",
-                    "toggle_counter",
-                    "counter_unavailable",
-                    "goals",
-                    "toggle_goal",
-                    "auto_goals",
-                    "kpi",
-                    "set_kpi",
-                    "set_tolerance",
-                    "enter_target",
-                )
-                and user not in runtime.settings.telegram_admin_user_ids
+            admin_only = action in (
+                "schedule",
+                "users",
+                "member_add",
+                "member_revoke",
+                "member_restore",
+                "refresh",
+            )
+            configuration = action in (
+                "data",
+                "refresh_data",
+                "counters",
+                "toggle_counter",
+                "counter_unavailable",
+                "goals",
+                "toggle_goal",
+                "auto_goals",
+                "kpi",
+                "set_kpi",
+                "set_tolerance",
+                "enter_target",
+            )
+            if (admin_only and user not in runtime.settings.telegram_admin_user_ids) or (
+                configuration and not can_configure(user)
             ):
                 raise PermissionError
         except (PermissionError, KeyError):
