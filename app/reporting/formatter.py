@@ -342,6 +342,9 @@ def card(report: ClientReport, summary: str | None = None) -> str:
         if source in ("Директ", "Метрика")
     )
     footer = f"Данные: {sources}."
+    if report.targets.get("excluded_campaigns"):
+        words = ", ".join(f"«{w}»" for w in report.targets["excluded_campaigns"])
+        footer += f" Кампании со словами {words} в рисках не подсвечиваются."
     if any(v.startswith("Конверсии могут") for v in report.limitations):
         footer += " Конверсии за последние дни ещё дополняются."
     lines += ["", footer]

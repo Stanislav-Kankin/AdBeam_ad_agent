@@ -31,6 +31,18 @@ TOLERANCES = (3, 5, 10)
 TARGET_FIELDS = {"target_cpa": "целевой CPA, ₽", "target_drr": "целевой ДРР, %"}
 
 
+def parse_exclusions(value):
+    """ "бренд, brand" -> ["бренд", "brand"]; "0", "-" or "нет" clears the list."""
+    text = value.strip()
+    if text.casefold() in ("0", "-", "нет", "—"):
+        return []
+    words = [word.strip() for word in text.replace(";", ",").split(",")]
+    words = [word for word in dict.fromkeys(words) if word]
+    if not words or len(words) > 10 or any(not 2 <= len(word) <= 60 for word in words):
+        raise ValueError
+    return words
+
+
 def parse_target(value):
     """Positive number from '2 500', '2500,5' or '0'/'-' to clear the target."""
     cleaned = value.strip().replace(" ", "").replace(" ", "").replace(",", ".")
@@ -74,11 +86,19 @@ def install_menu(router, runtime, launch, launch_chart):
             await message.answer("Время ввода истекло. Откройте «KPI проекта» заново.")
             return
         try:
-            value = parse_target(message.text)
+            value = (
+                parse_exclusions(message.text)
+                if field == "excluded_campaigns"
+                else parse_target(message.text)
+            )
             client = runtime.registry.require(message.chat.id, client_id)
         except (InvalidOperation, ValueError):
             awaiting_target[key] = (started, client_id, field)
-            await message.answer("Нужно положительное число, например 2500. 0 — убрать цель.")
+            await message.answer(
+                "Нужны слова через запятую (до 10, от 2 символов), например: бренд, brand."
+                if field == "excluded_campaigns"
+                else "Нужно положительное число, например 2500. 0 — убрать цель."
+            )
             return
         except PermissionError:
             await message.answer("Клиент больше недоступен этому чату.")
@@ -429,7 +449,9 @@ def install_menu(router, runtime, launch, launch_chart):
                 f"{fmt_short(targets.target_cpa, money=True) + ' ₽' if targets.target_cpa else 'не задан'}\n"
                 f"Целевой ДРР: "
                 f"{fmt_short(targets.target_drr) + '%' if targets.target_drr else 'не задан'}\n"
-                f"Допуск (статпогрешность): {fmt_short(tolerance)}%\n\n"
+                f"Допуск (статпогрешность): {fmt_short(tolerance)}%\n"
+                f"Не подсвечивать в рисках кампании со словами: "
+                f"{', '.join(targets.excluded_campaigns) or 'нет'}\n\n"
                 "Статус клиента считается по главному KPI. Если он в пределах допуска "
                 "или улучшился, изменения расхода, CPC и CR показываются как контекст, "
                 "а не как проблема."
@@ -470,6 +492,12 @@ def install_menu(router, runtime, launch, launch_chart):
             )
             for field, label in TARGET_FIELDS.items():
                 row(f"✏️ Задать {label}", "enter_target", client_id=client_id, field=field)
+            row(
+                "🚫 Не подсвечивать кампании (бренд и т. п.)",
+                "enter_target",
+                client_id=client_id,
+                field="excluded_campaigns",
+            )
             row("← К отчёту", "report", client_id=client_id, page=page)
         elif screen == "schedule":
             if user not in runtime.settings.telegram_admin_user_ids:
@@ -689,7 +717,11 @@ def install_menu(router, runtime, launch, launch_chart):
         elif action == "enter_target":
             awaiting_target[(chat, user)] = (monotonic(), kwargs["client_id"], kwargs["field"])
             await callback.message.answer(
-                f"Пришлите {TARGET_FIELDS[kwargs['field']]} числом, например 2500. "
+                "Пришлите слова из названий кампаний через запятую, например: бренд, brand. "
+                "Такие кампании останутся в итогах, но не будут попадать в риски. "
+                "0 — убрать исключения, /cancel — отмена."
+                if kwargs["field"] == "excluded_campaigns"
+                else f"Пришлите {TARGET_FIELDS[kwargs['field']]} числом, например 2500. "
                 "0 — убрать цель, /cancel — отмена."
             )
         elif action == "run":

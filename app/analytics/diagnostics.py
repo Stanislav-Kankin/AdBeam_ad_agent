@@ -933,7 +933,11 @@ class CheckService:
             campaign_drivers = []
             if mode != CheckMode.SUMMARY:
                 checks["кампании"] = current.direct.status.value
-                campaign_drivers = drivers(current.direct, previous.direct)[:10]
+                campaign_drivers = [
+                    row
+                    for row in drivers(current.direct, previous.direct)
+                    if not client.targets.is_excluded(row["name"])
+                ][:10]
                 if not health["healthy"]:
                     for row in campaign_drivers:
                         row["conversions_delta"] = None
@@ -959,6 +963,7 @@ class CheckService:
                     for row in current.direct.rows:
                         if (
                             row.totals.conversions == 0
+                            and not client.targets.is_excluded(row.name)
                             and (row.totals.spend or 0) >= threshold
                             and (row.totals.clicks or 0) >= client.targets.minimum_clicks
                         ):
@@ -1136,6 +1141,7 @@ class CheckService:
                     "target_cpa": client.targets.target_cpa,
                     "target_drr": client.targets.target_drr,
                     "kpi_change_tolerance_percent": client.targets.kpi_change_tolerance_percent,
+                    "excluded_campaigns": client.targets.excluded_campaigns,
                 },
                 goal_scope=current.metrica.scope,
                 goal_metrics=[

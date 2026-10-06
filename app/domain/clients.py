@@ -61,6 +61,16 @@ class Targets(StrictModel):
     no_conversion_cpa_multiple: float = Field(default=2, gt=0)
     cpa_excess_percent: float = Field(default=30, gt=0)
     kpi_change_tolerance_percent: float = Field(default=3, ge=0, le=100)
+    # Words in campaign names kept out of risks (brand campaigns held on top at any
+    # price): their spend stays in the totals, they are just not flagged.
+    excluded_campaigns: list[Annotated[str, Field(min_length=2, max_length=60)]] = Field(
+        default_factory=list, max_length=10
+    )
+
+    def is_excluded(self, campaign_name) -> bool:
+        name = str(campaign_name or "").casefold()
+        return any(word.casefold() in name for word in self.excluded_campaigns)
+
     cpc_change_percent: float = Field(default=30, gt=0)
     cr_drop_percent: float = Field(default=25, gt=0, le=100)
     spend_change_percent: float = Field(default=25, gt=0)
