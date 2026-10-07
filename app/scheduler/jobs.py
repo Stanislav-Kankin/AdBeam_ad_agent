@@ -10,6 +10,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app.analytics.periods import MOSCOW, AnalysisPeriod, DateRange, make_period, today_moscow
 from app.domain.reports import CheckMode, TriggerSource
 from app.reporting.formatter import daily_digest, split_message, weekly_digest
+from app.storage.backup import backup_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,15 @@ class DailySchedule:
             kwargs={"days": self.settings.history_retention_days},
             id="purge_history",
             next_run_time=datetime.now(MOSCOW),
+            max_instances=1,
+            coalesce=True,
+        )
+        self.scheduler.add_job(
+            self.backup,
+            "interval",
+            hours=24,
+            id="database_backup",
+            next_run_time=datetime.now(MOSCOW) + timedelta(minutes=3),
             max_instances=1,
             coalesce=True,
         )
@@ -91,6 +101,12 @@ class DailySchedule:
                 max_instances=1,
             )
         self.scheduler.start()
+
+    async def backup(self):
+        try:
+            await asyncio.to_thread(backup_sqlite, self.settings.database_url)
+        except Exception as exc:
+            logger.error("Database backup failed (%s)", type(exc).__name__)
 
     async def warm_cache(self):
         try:

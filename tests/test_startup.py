@@ -99,3 +99,25 @@ async def test_invalid_token_is_not_retried_forever():
     with pytest.raises(TelegramUnauthorizedError):
         await main.wait_for_telegram(bot)
     bot.me.assert_awaited_once()
+
+
+def test_sqlite_backup_copies_and_keeps_two_weeks(tmp_path):
+    import sqlite3
+    from datetime import date, timedelta
+
+    from app.storage.backup import backup_sqlite
+
+    db = tmp_path / "adbeam_production.db"
+    from contextlib import closing
+
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("create table t (x)")
+        conn.execute("insert into t values (42)")
+    url = f"sqlite+aiosqlite:///{db.as_posix()}"
+    start = date(2026, 10, 1)
+    for day in range(16):
+        target = backup_sqlite(url, keep=14, today=start + timedelta(days=day))
+    copies = sorted((tmp_path / "backups").glob("*.db"))
+    assert len(copies) == 14 and copies[-1] == target
+    with closing(sqlite3.connect(target)) as conn:
+        assert conn.execute("select x from t").fetchone() == (42,)
