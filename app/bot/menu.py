@@ -1,6 +1,7 @@
 """Owner-bound inline navigation over clients authorized for the current chat."""
 
 import secrets
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from time import monotonic
 
@@ -54,7 +55,8 @@ def parse_target(value):
     return number
 
 
-MENU_TTL = 6 * 3600
+# Buttons are kept in the database, so a restart no longer kills open menus.
+MENU_TTL = 3 * 24 * 3600
 
 
 def install_menu(router, runtime, launch, launch_chart):
@@ -163,11 +165,31 @@ def install_menu(router, runtime, launch, launch_chart):
             )
         await show(message, message.from_user.id, screen="users")
 
-    def clear(chat, user):
+    async def clear(chat, user):
         """/cancel: drop every menu this user opened in the chat."""
         for key, value in list(actions.items()):
             if value[1:3] == (chat, user) or monotonic() - value[0] > MENU_TTL:
                 actions.pop(key, None)
+        await runtime.checks.repository.drop_menu_actions(chat=chat, user=user)
+
+    async def lookup(token):
+        """A button from memory, or from the database after a restart."""
+        item = actions.get(token)
+        if item is not None:
+            return item
+        stored = await runtime.checks.repository.menu_action(token, timedelta(seconds=MENU_TTL))
+        if stored is None:
+            return None
+        item = (
+            monotonic() - stored["age_seconds"],
+            stored["chat"],
+            stored["user"],
+            stored["action"],
+            stored["kwargs"],
+            stored["screen_id"],
+        )
+        actions[token] = item
+        return item
 
     def prune(screen=None):
         # A new screen must not kill other menus still open in a group; only the
@@ -181,11 +203,22 @@ def install_menu(router, runtime, launch, launch_chart):
         prune()
         clients = runtime.registry.visible(chat)
         rows = []
+        fresh = []
         screen_id = secrets.token_hex(4)
 
         def button(label, action, **kwargs):
             token = secrets.token_hex(8)
             actions[token] = (monotonic(), chat, user, action, kwargs, screen_id)
+            fresh.append(
+                {
+                    "token": token,
+                    "chat": chat,
+                    "user": user,
+                    "action": action,
+                    "kwargs": kwargs,
+                    "screen_id": screen_id,
+                }
+            )
             return InlineKeyboardButton(text=label, callback_data="menu:" + token)
 
         def row(label, action, **kwargs):
@@ -580,6 +613,7 @@ def install_menu(router, runtime, launch, launch_chart):
         while len(actions) > 4000:
             actions.pop(next(iter(actions)))
         markup = InlineKeyboardMarkup(inline_keyboard=rows)
+        await runtime.checks.repository.save_menu_actions(fresh)
         if edit:
             try:
                 await retry_telegram(
@@ -599,7 +633,7 @@ def install_menu(router, runtime, launch, launch_chart):
 
     @router.callback_query(F.data.startswith("menu:"))
     async def navigate(callback):
-        item = actions.get(callback.data.removeprefix("menu:"))
+        item = await lookup(callback.data.removeprefix("menu:"))
         if (
             not item
             or monotonic() - item[0] > MENU_TTL
@@ -663,6 +697,7 @@ def install_menu(router, runtime, launch, launch_chart):
             )
             return
         prune(screen_id)
+        await runtime.checks.repository.drop_menu_actions(screen_id=screen_id)
         await answer_callback(callback)
         if action == "member_add":
             awaiting_user[(chat, user)] = monotonic()

@@ -74,6 +74,18 @@ class LlmUsage(Base):
     cost_usd: Mapped[float] = mapped_column(Float)
 
 
+class MenuAction(Base):
+    __tablename__ = "menu_actions"
+    token: Mapped[str] = mapped_column(String(16), primary_key=True)
+    app_mode: Mapped[str] = mapped_column(String(20))
+    chat_id: Mapped[str] = mapped_column(String(30))
+    user_id: Mapped[str] = mapped_column(String(30))
+    action: Mapped[str] = mapped_column(String(40))
+    kwargs: Mapped[dict] = mapped_column(JSON)
+    screen_id: Mapped[str] = mapped_column(String(8), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
 class Delivery(Base):
     __tablename__ = "deliveries"
     key: Mapped[str] = mapped_column(String(120), primary_key=True)

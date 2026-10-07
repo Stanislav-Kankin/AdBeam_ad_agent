@@ -498,7 +498,7 @@ def build_dispatcher(runtime):
         elif name == "clients":
             await show_menu(message, message.from_user.id, screen="clients")
         elif name == "cancel":
-            clear_menu(message.chat.id, message.from_user.id)
+            await clear_menu(message.chat.id, message.from_user.id)
             for key in [
                 k for k, v in pending.items() if v[1:3] == (message.chat.id, message.from_user.id)
             ]:

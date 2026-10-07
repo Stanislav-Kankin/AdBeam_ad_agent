@@ -776,3 +776,29 @@ async def test_audience_button_sends_slides_and_theses(runtime):
     assert albums and len(albums[0].media) == 2  # clicks vs conversions; visit quality
     text = "\n".join(getattr(m, "text", "") or "" for m in sent)
     assert "Аудитория" in text and "Качество визитов из рекламы" in text
+
+
+async def test_menu_buttons_survive_a_restart(runtime):
+    from aiogram.types import CallbackQuery
+
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        await build_dispatcher(runtime).feed_update(bot, message_update("/menu"))
+        keyboard = session.sent[-1].reply_markup.inline_keyboard
+        data = next(b.callback_data for row in keyboard for b in row if "Клиенты" in b.text)
+        # A new dispatcher has an empty in-memory menu, as after a container restart.
+        restarted = build_dispatcher(runtime)
+        await restarted.feed_update(
+            bot,
+            Update(
+                update_id=2,
+                callback_query=CallbackQuery(
+                    id="old",
+                    from_user=User(id=1, is_bot=False, first_name="U"),
+                    chat_instance="test",
+                    message=message_update("menu").message,
+                    data=data,
+                ),
+            ),
+        )
+    assert "Подключённые клиенты" in session.sent[-1].text

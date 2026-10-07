@@ -17,6 +17,7 @@ from app.storage.models import (
     Delivery,
     DirectDimensionPage,
     LlmUsage,
+    MenuAction,
     MetricaCounterCatalog,
     Run,
     SnapshotCache,
@@ -157,6 +158,49 @@ class Repository:
             ).one()
         return {"calls": row[0], "cost_usd": float(row[1]), "input": row[2], "output": row[3]}
 
+    async def save_menu_actions(self, rows):
+        if not rows:
+            return
+        async with self.write_session() as session:
+            for row in rows:
+                session.add(
+                    MenuAction(
+                        token=row["token"],
+                        app_mode=self.app_mode,
+                        chat_id=str(row["chat"]),
+                        user_id=str(row["user"]),
+                        action=row["action"],
+                        kwargs=safe_json(row["kwargs"]),
+                        screen_id=row["screen_id"],
+                    )
+                )
+
+    async def menu_action(self, token, max_age):
+        async with self.sessions() as session:
+            row = await session.get(MenuAction, token)
+        if row is None or row.app_mode != self.app_mode:
+            return None
+        age = datetime.now(UTC) - row.created_at.replace(tzinfo=row.created_at.tzinfo or UTC)
+        if age > max_age:
+            return None
+        return {
+            "age_seconds": age.total_seconds(),
+            "chat": int(row.chat_id),
+            "user": int(row.user_id),
+            "action": row.action,
+            "kwargs": row.kwargs,
+            "screen_id": row.screen_id,
+        }
+
+    async def drop_menu_actions(self, *, screen_id=None, chat=None, user=None):
+        query = delete(MenuAction).where(MenuAction.app_mode == self.app_mode)
+        if screen_id is not None:
+            query = query.where(MenuAction.screen_id == screen_id)
+        if chat is not None:
+            query = query.where(MenuAction.chat_id == str(chat), MenuAction.user_id == str(user))
+        async with self.write_session() as session:
+            await session.execute(query)
+
     async def purge(self, days=90):
         cutoff = datetime.now(UTC) - timedelta(days=days)
         async with self.write_session() as session:
@@ -166,6 +210,12 @@ class Repository:
             await session.execute(
                 delete(ToolEvent).where(
                     ToolEvent.app_mode == self.app_mode, ToolEvent.created_at < cutoff
+                )
+            )
+            await session.execute(
+                delete(MenuAction).where(
+                    MenuAction.app_mode == self.app_mode,
+                    MenuAction.created_at < datetime.now(UTC) - timedelta(days=3),
                 )
             )
             await session.execute(
