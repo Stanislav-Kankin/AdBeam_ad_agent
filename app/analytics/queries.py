@@ -100,7 +100,7 @@ async def metrica_catalog(checks, client):
         "counters": catalog,
         "limitations": [
             f"Нет доступа к счётчикам {', '.join(str(c['id']) for c in catalog if c['access'] != 'ok')}: "
-            "нужен гостевой доступ для логина токена Метрики."
+            "обычно доступ закрыт политикой клиента, бот работает по данным Директа."
         ]
         if any(c["access"] != "ok" for c in catalog)
         else [],

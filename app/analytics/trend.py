@@ -198,7 +198,10 @@ def summary(trend):
                         )
             lines.append(text)
     else:
-        lines += ["", "Качество трафика не показано: Метрика по этому счётчику недоступна."]
+        lines += [
+            "",
+            "Качество трафика не показано: доступ к Метрике закрыт клиентом или недоступен.",
+        ]
 
     reading = []
     if conv_shift is not None and cpa_shift is not None:
