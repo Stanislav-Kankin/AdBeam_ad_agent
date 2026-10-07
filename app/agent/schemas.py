@@ -96,7 +96,7 @@ class MetricaReportArgs(ClientArgs):
     goal_ids: list[str] = Field(
         default_factory=list,
         max_length=10,
-        description="ID целей из get_metrica_goals; пустой список использует основные цели.",
+        description="ID целей из get_metrica_catalog; пустой список использует основные цели.",
     )
 
     @field_validator("campaign_ids")

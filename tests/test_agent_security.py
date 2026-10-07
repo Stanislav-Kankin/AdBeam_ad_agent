@@ -58,10 +58,10 @@ async def test_client_permission_each_tool_and_no_cross_chat_leak(runtime):
     [
         ("execute_sql", '{"sql":"SELECT * FROM clients"}'),
         ("get_account_overview", '{"client_id":"west_export","period":"91d"}'),
-        ("get_revenue", '{"client_id":"west_export","top_n":500}'),
-        ("get_revenue", '{"client_id":"west_export","url":"https://evil.invalid"}'),
-        ("get_revenue", "{invalid"),
-        ("get_revenue", '{"client_id":"west_export","start_date":"2099-01-01"}'),
+        ("get_campaign_breakdown", '{"client_id":"west_export","top_n":500}'),
+        ("get_campaign_breakdown", '{"client_id":"west_export","url":"https://evil.invalid"}'),
+        ("get_campaign_breakdown", "{invalid"),
+        ("get_campaign_breakdown", '{"client_id":"west_export","start_date":"2099-01-01"}'),
     ],
 )
 async def test_tool_parameters_validated_and_audited(runtime, name, args):
@@ -92,7 +92,7 @@ def test_long_period_aliases_are_valid(period):
 
 async def test_tool_accepts_client_login_and_long_period(runtime):
     result = await runtime.agent.tools.call(
-        "compare_periods",
+        "get_campaign_breakdown",
         '{"client_id":"example-west","period":"60d"}',
         chat_id=123456789,
         request_id="long-period",

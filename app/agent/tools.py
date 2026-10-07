@@ -13,8 +13,8 @@ from app.agent.schemas import (
     MetricaReportArgs,
 )
 from app.analytics import queries
-from app.analytics.diagnostics import drivers, snapshot_metrics
-from app.analytics.metrics import calculate, compare
+from app.analytics.diagnostics import drivers
+from app.analytics.metrics import calculate
 from app.analytics.rules import tracking_health
 from app.analytics.trend import load_trend, quality_periods, summary
 from app.domain.reports import CheckMode, TriggerSource
@@ -23,12 +23,7 @@ from app.storage.repository import safe_json
 DESCRIPTIONS = {
     "list_clients": "Список доступных активных клиентов, ID, имён и алиасов. Не угадывай клиента; уточни неоднозначность.",
     "get_account_overview": "Единая стандартная проверка общего статуса: доступность, цели, бюджет, метрики, кампании, устройства, сигналы и рекомендации.",
-    "compare_periods": "Сравнение завершённых равных периодов: абсолютные значения и проценты, объём данных.",
     "get_campaign_breakdown": "Кампании и их вклад в изменение расходов и конверсий, рассчитанный backend.",
-    "get_device_breakdown": "Агрегированные показатели по устройствам.",
-    "get_geo_breakdown": "Агрегированные показатели по регионам (ID регионов Директа).",
-    "get_search_queries": "Топ поисковых запросов по расходу, клики и основные конверсии; контакты маскируются.",
-    "get_placements": "Топ площадок РСЯ по расходу, кликам и основным конверсиям.",
     "get_audience_breakdown": "Возраст, пол и уровень дохода рекламного трафика Директа; долгосрочные интересы аудитории сайта из Метрики.",
     "get_metrica_direct_report": "Отчёт Метрики по кампаниям Директа и выбранным целям: кампании, объявления, условия показа, поисковые фразы или площадки; включает поведение и сравнение периодов.",
     "get_campaign_goal_performance": "Кампании по целям, заданным в их настройках (ключевые цели и цель стратегии): конверсии, CPA и лучшая кампания по каждой цели. Не требует основных целей и Метрики; период до 366 дней без сравнения.",
@@ -36,18 +31,9 @@ DESCRIPTIONS = {
     "get_metrica_catalog": "Справочник клиента: счётчики Метрики из его кампаний (название, сайт, есть ли доступ) и их цели с ID и названиями. Вызывай перед query_metrica и перед выбором целей.",
     "query_metrica": "Универсальный отчёт Метрики: сам выбери metrics, dimensions, filters, sort по вопросу пользователя. Период до 366 дней, compare=true добавляет прошлый период и изменения. Данные — весь трафик счётчика, если фильтр не ограничивает источник или кампании Директа.",
     "query_direct": "Универсальный отчёт Директа (Reports API): тип отчёта, поля-срезы и показатели, фильтры, цели для конверсий по каждой цели, сортировка. Период до 366 дней, compare=true — сравнение с прошлым периодом.",
-    "get_metrica_goals": "Доступные цели и достижения основных целей Метрики, без персональных данных.",
-    "check_tracking_health": "Проверка поступления данных, наличия целей и исчезновения конверсий. Не является тестом форм на сайте.",
-    "get_revenue": "Выручка из настроенного источника, её статус, период и сопоставимость.",
-    "get_drr": "ДРР, рассчитанный backend; при отсутствующей, нулевой или несопоставимой выручке — причина отказа.",
 }
-DIMENSIONS = {
-    "get_campaign_breakdown": "campaign",
-    "get_device_breakdown": "device",
-    "get_geo_breakdown": "geo",
-    "get_search_queries": "search",
-    "get_placements": "placement",
-}
+# Device, region, query and placement slices are query_direct now.
+DIMENSIONS = {"get_campaign_breakdown": "campaign"}
 
 SCHEMAS = {
     "list_clients": ListArgs,
@@ -245,41 +231,7 @@ class ToolRegistry:
                     "tracking": health,
                     "limitations": a.limitations + b.limitations,
                 }
-            now, before = await self.checks.snapshots(client, period)
-            health = tracking_health(client, now, before, period)
-            if name == "check_tracking_health":
-                return {**base, **health}
-            if name == "get_metrica_goals":
-                goals = sorted(now.metrica.goals, key=lambda g: not g["primary"])
-                return {
-                    **base,
-                    "status": now.metrica.status,
-                    "goals": goals[: args.top_n],
-                    "total_rows": len(goals),
-                    "truncated": len(goals) > args.top_n,
-                    "missing_goal_ids": now.metrica.missing_goal_ids,
-                }
-            if name == "get_revenue":
-                return {**base, **now.revenue.model_dump(mode="json")}
-            a, b = snapshot_metrics(now, healthy=health["healthy"]), snapshot_metrics(before)
-            if name == "get_drr":
-                return {
-                    **base,
-                    "drr": a.drr,
-                    "spend": a.spend,
-                    "revenue": a.revenue,
-                    "status": "ok" if a.drr is not None else "not_calculated",
-                    "reason": ""
-                    if a.drr is not None
-                    else now.revenue.reason or "Выручка отсутствует, равна нулю или несопоставима.",
-                }
-            return {
-                **base,
-                "metrics": compare(a, b),
-                "tracking": health,
-                "sufficient_data": health["healthy"]
-                and (a.clicks or 0) >= client.targets.minimum_clicks,
-            }
+            raise ValueError("unknown_tool")
         except PermissionError:
             status, error = "denied", "Клиент не найден или недоступен этому чату."
         except ValidationError as exc:
