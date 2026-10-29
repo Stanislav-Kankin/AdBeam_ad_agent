@@ -101,23 +101,65 @@ async def test_invalid_token_is_not_retried_forever():
     bot.me.assert_awaited_once()
 
 
-def test_sqlite_backup_copies_and_keeps_two_weeks(tmp_path):
+def test_sqlite_backup_copies_keeps_a_week_and_drops_broken_copies(tmp_path):
     import sqlite3
+    from contextlib import closing
     from datetime import date, timedelta
 
     from app.storage.backup import backup_sqlite
 
     db = tmp_path / "adbeam_production.db"
-    from contextlib import closing
-
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute("create table t (x)")
         conn.execute("insert into t values (42)")
     url = f"sqlite+aiosqlite:///{db.as_posix()}"
+    folder = tmp_path / "backups"
+    folder.mkdir()
+    # Leftovers of copies a full disk cut short.
+    (folder / "adbeam_production_2026-09-01.db").write_bytes(b"")
+    (folder / "adbeam_production_2026-09-02.db-journal").write_bytes(b"x")
+    (folder / "adbeam_production_2026-09-03.db.partial").write_bytes(b"x")
     start = date(2026, 10, 1)
-    for day in range(16):
-        target = backup_sqlite(url, keep=14, today=start + timedelta(days=day))
-    copies = sorted((tmp_path / "backups").glob("*.db"))
-    assert len(copies) == 14 and copies[-1] == target
+    for day in range(10):
+        target = backup_sqlite(url, keep=7, today=start + timedelta(days=day))
+    assert sorted(folder.iterdir()) == sorted(folder.glob("*.db"))
+    copies = sorted(folder.glob("*.db"))
+    assert len(copies) == 7 and copies[-1] == target
     with closing(sqlite3.connect(target)) as conn:
         assert conn.execute("select x from t").fetchone() == (42,)
+
+
+def test_sqlite_backup_is_skipped_when_disk_is_nearly_full(tmp_path, monkeypatch):
+    import shutil
+    import sqlite3
+    from collections import namedtuple
+    from contextlib import closing
+
+    from app.storage.backup import backup_sqlite
+
+    db = tmp_path / "adbeam_production.db"
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("create table t (x)")
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100, 100, 0))
+    assert backup_sqlite(f"sqlite+aiosqlite:///{db.as_posix()}") is None
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+def test_sqlite_compaction_returns_deleted_space(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    from app.storage.backup import compact_sqlite
+
+    db = tmp_path / "adbeam_production.db"
+    url = f"sqlite+aiosqlite:///{db.as_posix()}"
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("create table t (x)")
+        conn.executemany("insert into t values (?)", [("x" * 5000,)] * 400)
+    assert compact_sqlite(url) is None
+    before = db.stat().st_size
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("delete from t")
+    assert db.stat().st_size == before
+    assert compact_sqlite(url) < before / 10

@@ -122,11 +122,11 @@ class MockProvider:
             campaigns_status=DataStatus.OK,
         )
 
-    async def breakdown_page(self, client, period, dimension, page):
+    async def breakdown_page(self, client, period, dimension, page, *, limit=10000):
         if page:
             return [], True
         report = await self.breakdown(client, period, dimension)
-        return report.rows, True
+        return report.rows[:limit], len(report.rows) < limit
 
     # Rusagro-like account: the search campaign lists a lead goal plus a micro goal
     # that fires often; the Master campaign exposes no goal but brings the form leads.

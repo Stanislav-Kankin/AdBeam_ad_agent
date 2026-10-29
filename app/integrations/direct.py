@@ -203,11 +203,12 @@ class DirectAdapter:
             ]
         return params, fields
 
-    async def breakdown_page(self, client, period, dimension, page):
+    async def breakdown_page(self, client, period, dimension, page, *, limit=None):
+        limit = limit or REPORT_PAGE_SIZE
         params, fields = self.report_params(client, period, dimension)
         page_params = {
             **params,
-            "Page": {"Limit": REPORT_PAGE_SIZE, "Offset": page * REPORT_PAGE_SIZE},
+            "Page": {"Limit": limit, "Offset": page * limit},
         }
         page_params["ReportName"] = (
             "adbeam_"
@@ -234,7 +235,7 @@ class DirectAdapter:
             client.direct.attribution_model,
             fields,
         )
-        return rows, len(rows) < REPORT_PAGE_SIZE
+        return rows, len(rows) < limit
 
     async def breakdown(self, client, period, dimension="campaign", *, max_pages=REPORT_MAX_PAGES):
         rows, limited = [], False

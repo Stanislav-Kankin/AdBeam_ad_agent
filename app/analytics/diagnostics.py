@@ -41,6 +41,7 @@ EXTRA_GOALS_LIMIT = 20  # two more Direct report batches at most
 MAX_GOALS_SHOWN = 8
 GOALS_REFRESH_SECONDS = 12 * 3600
 WAREHOUSE_DIMENSIONS = ("device", "geo", "search", "placement")
+WAREHOUSE_ROWS_PER_DAY = 500
 
 
 def snapshot_metrics(snapshot, *, healthy=True):
@@ -187,23 +188,13 @@ class CheckService:
                 for client_index, client in enumerate(clients):
                     for dimension_index, dimension in enumerate(WAREHOUSE_DIMENSIONS):
                         item = progress.get((client.id, str(day), dimension))
-                        if item:
-                            pages = item["pages"]
-                            last = item["last"]
-                            if last is not None and pages == set(range(last + 1)):
-                                continue
-                            page = next(
-                                (value for value in range(max(pages) + 2) if value not in pages),
-                                0,
-                            )
-                        else:
-                            page = 0
-                        if page >= 100:
+                        if item and item["last"] is not None and item["pages"] == {0}:
                             continue
-                        candidates.append((page, client_index, dimension_index, client, dimension))
+                        candidates.append((client_index, dimension_index, client, dimension))
                 if not candidates:
                     continue
-                page, _, _, client, dimension = min(candidates, key=lambda value: value[:3])
+                _, _, client, dimension = min(candidates, key=lambda value: value[:2])
+                page = 0
                 logger.info(
                     "Dimension warehouse warm client=%s day=%s dimension=%s page=%s",
                     client.id,
@@ -211,14 +202,14 @@ class CheckService:
                     dimension,
                     page + 1,
                 )
-                rows, complete = await self.provider.breakdown_page(client, period, dimension, page)
+                # Reports are sorted by cost and only the top rows of a day are ever read;
+                # the extra row marks a day that was cut. Full search-query and placement
+                # pages filled gigabytes nobody used.
+                rows, complete = await self.provider.breakdown_page(
+                    client, period, dimension, page, limit=WAREHOUSE_ROWS_PER_DAY + 1
+                )
                 await self.repository.save_dimension_page(
-                    client.id,
-                    day,
-                    dimension,
-                    page,
-                    rows,
-                    last_page=complete,
+                    client.id, day, dimension, page, rows, last_page=True
                 )
                 return client.id, day, dimension, page, complete
         return None
@@ -248,8 +239,8 @@ class CheckService:
                 rows=rows,
                 totals=aggregate([row.totals for row in rows]),
                 limitations=[
-                    "Все страницы разреза сохранены; для интерактивного анализа взяты "
-                    "500 строк с наибольшим расходом за каждый день."
+                    f"За каждый день сохранены {WAREHOUSE_ROWS_PER_DAY} строк с наибольшим "
+                    "расходом; более мелкие строки в анализ не вошли."
                 ]
                 if stored["truncated"]
                 else [],

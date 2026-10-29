@@ -8,7 +8,7 @@ from aiogram import Bot
 from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
-from sqlalchemy import create_engine, inspect, select
+from sqlalchemy import create_engine, inspect, select, update
 
 from app.agent.service import AgentService
 from app.bot.handlers import build_dispatcher
@@ -155,6 +155,47 @@ async def test_retention_keeps_other_mode_and_pending_delivery(runtime):
         deliveries = (await session.scalars(select(Delivery))).all()
     assert [e.app_mode for e in events] == ["production"]
     assert [d.key for d in deliveries] == ["mock:pending"]
+
+
+async def test_retention_drops_stale_caches_but_keeps_fresh_ones(runtime, client):
+    from app.analytics.periods import DateRange, make_period
+    from app.storage.models import DailySnapshot, DirectDimensionPage, SnapshotCache
+
+    repo = runtime.checks.repository
+    period = make_period("yesterday").current
+    snapshot = await runtime.checks.provider.snapshot(client, period)
+    await repo.save_snapshot(client.id, period, snapshot)
+    await repo.save_daily_snapshot(client.id, period, snapshot)
+    await repo.save_dimension_page(client.id, period.start, "search", 0, [], last_page=True)
+    old = DateRange(start=period.start - timedelta(days=1), end=period.start - timedelta(days=1))
+    await repo.save_snapshot(client.id, old, snapshot)
+    await repo.save_daily_snapshot(client.id, old, snapshot)
+    await repo.save_dimension_page(client.id, old.start, "search", 0, [], last_page=True)
+    long_ago = datetime.now(UTC) - timedelta(days=8)
+    async with repo.sessions.begin() as session:
+        await session.execute(
+            update(SnapshotCache)
+            .where(SnapshotCache.period_start == str(old.start))
+            .values(expires_at=long_ago)
+        )
+        await session.execute(
+            update(DailySnapshot)
+            .where(DailySnapshot.day == str(old.start))
+            .values(refresh_after=long_ago)
+        )
+        await session.execute(
+            update(DirectDimensionPage)
+            .where(DirectDimensionPage.day == str(old.start))
+            .values(refresh_after=long_ago)
+        )
+    await repo.purge(90)
+    async with repo.sessions() as session:
+        for model, column in (
+            (SnapshotCache, SnapshotCache.period_start),
+            (DailySnapshot, DailySnapshot.day),
+            (DirectDimensionPage, DirectDimensionPage.day),
+        ):
+            assert (await session.scalars(select(column))).all() == [str(period.start)], model
 
 
 async def test_offline_reports_keep_polling_and_honor_retryin():

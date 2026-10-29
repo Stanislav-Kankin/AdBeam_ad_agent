@@ -90,10 +90,12 @@ async def test_dimension_warehouse_combines_daily_pages(runtime, client):
     assert report.status.value == "ok"
 
 
-async def test_dimension_warehouse_continues_from_saved_page(runtime, client):
+async def test_dimension_warehouse_keeps_only_top_rows_of_a_day(runtime, client):
+    from app.analytics.diagnostics import WAREHOUSE_ROWS_PER_DAY
     from app.domain.reports import BreakdownRow, Totals
 
     day = today_moscow() - timedelta(days=1)
+    # A page left unfinished by the old multi-page warehouse is fetched again.
     await runtime.checks.repository.save_dimension_page(
         client.id,
         day,
@@ -111,10 +113,20 @@ async def test_dimension_warehouse_continues_from_saved_page(runtime, client):
             await runtime.checks.repository.save_dimension_page(
                 visible.id, day, dimension, 0, report.rows, last_page=True
             )
+    many = [
+        BreakdownRow(id=str(i), name=f"запрос {i}", totals=Totals(spend=1000 - i))
+        for i in range(WAREHOUSE_ROWS_PER_DAY + 40)
+    ]
+
+    async def page(client_, period, dimension, page, *, limit):
+        return many[:limit], len(many) < limit
+
+    runtime.checks.provider.breakdown_page = page
     result = await runtime.checks.warm_dimension_next(123456789, days=1)
-    assert result[:4] == (client.id, day, "device", 1)
-    report = await runtime.checks.breakdown(client, DateRange(start=day, end=day), "device")
-    assert report.rows[0].name == "DESKTOP"
+    assert result[:4] == (client.id, day, "device", 0)
+    assert await runtime.checks.warm_dimension_next(123456789, days=1) is None
+    stored = await runtime.checks.repository.dimension(client.id, day_range, "device")
+    assert len(stored["rows"]) == WAREHOUSE_ROWS_PER_DAY and stored["truncated"]
 
 
 async def test_conversation_context_survives_new_agent_service(runtime):

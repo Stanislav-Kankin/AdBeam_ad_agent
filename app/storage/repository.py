@@ -203,6 +203,9 @@ class Repository:
 
     async def purge(self, days=90):
         cutoff = datetime.now(UTC) - timedelta(days=days)
+        # Cached reports past their refresh time are never read again; a week of
+        # grace keeps the data status screen showing the last saved slice.
+        stale = datetime.now(UTC) - timedelta(days=7)
         async with self.write_session() as session:
             await session.execute(
                 delete(Run).where(Run.app_mode == self.app_mode, Run.started_at < cutoff)
@@ -228,13 +231,19 @@ class Repository:
             await session.execute(
                 delete(SnapshotCache).where(
                     SnapshotCache.app_mode == self.app_mode,
-                    SnapshotCache.expires_at < cutoff,
+                    SnapshotCache.expires_at < stale,
+                )
+            )
+            await session.execute(
+                delete(DailySnapshot).where(
+                    DailySnapshot.app_mode == self.app_mode,
+                    DailySnapshot.refresh_after < stale,
                 )
             )
             await session.execute(
                 delete(DirectDimensionPage).where(
                     DirectDimensionPage.app_mode == self.app_mode,
-                    DirectDimensionPage.captured_at < cutoff,
+                    DirectDimensionPage.refresh_after < stale,
                 )
             )
             await session.execute(
@@ -495,8 +504,8 @@ class Repository:
                 or item["pages"] != set(range(item["last"] + 1))
             ):
                 return None
-        # Reports are sorted by cost, so page zero contains the most useful rows.
-        # All pages remain persisted; interactive analysis keeps a bounded daily slice.
+        # Reports are sorted by cost; the warehouse keeps only page zero, cut to
+        # top_per_day rows plus one that marks a truncated day.
         async with self.sessions() as session:
             first_pages = (
                 await session.scalars(
