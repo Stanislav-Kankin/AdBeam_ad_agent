@@ -677,7 +677,7 @@ def install_menu(router, runtime, launch, launch_chart):
         elif screen == "mediaplan":
             client = runtime.registry.require(chat, client_id)
             record = await runtime.checks.repository.media_plan(client_id) or {}
-            text = badge + f"📅 Медиаплан\n{client.name}\n"
+            text = badge + f"📅 **Медиаплан · {client.name}**\n"
             if record.get("plan"):
                 plan = MediaPlan.model_validate(record["plan"])
                 current = f"{today_moscow():%Y-%m}"
@@ -727,7 +727,7 @@ def install_menu(router, runtime, launch, launch_chart):
             client = runtime.registry.require(chat, client_id)
             plan = MediaPlan.model_validate(data["plan"])
             text = badge + (
-                f"📅 Медиаплан · {client.name}\n"
+                f"📅 **Медиаплан · {client.name}**\n"
                 "Вот что я прочитал из таблицы. Проверьте цифры перед сохранением:\n\n"
                 + plan_preview(plan)
             )
@@ -748,11 +748,21 @@ def install_menu(router, runtime, launch, launch_chart):
             actions.pop(next(iter(actions)))
         markup = InlineKeyboardMarkup(inline_keyboard=rows)
         await runtime.checks.repository.save_menu_actions(fresh)
+        entities = None
+        # Screens with **headings** (media plan) are rendered bold; others stay plain.
+        if "**" in text:
+            parts = list(markdown_parts(text))
+            if len(parts) == 1:
+                text, entities = parts[0]
         if edit:
             try:
                 await retry_telegram(
                     lambda: message.edit_text(
-                        text, reply_markup=markup, parse_mode=None, request_timeout=7
+                        text,
+                        reply_markup=markup,
+                        parse_mode=None,
+                        entities=entities,
+                        request_timeout=7,
                     )
                 )
             except TelegramBadRequest as exc:
@@ -761,7 +771,11 @@ def install_menu(router, runtime, launch, launch_chart):
         else:
             await retry_telegram(
                 lambda: message.answer(
-                    text, reply_markup=markup, parse_mode=None, request_timeout=7
+                    text,
+                    reply_markup=markup,
+                    parse_mode=None,
+                    entities=entities,
+                    request_timeout=7,
                 )
             )
 

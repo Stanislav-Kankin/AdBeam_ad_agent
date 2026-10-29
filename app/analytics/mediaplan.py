@@ -125,9 +125,9 @@ def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=()):
     missing = [goal for goal in plan.goal_ids if goal not in set(main_goal_ids)]
     if plan.goal_ids and missing:
         notes.append(
-            f"В медиаплане {len(plan.goal_ids)} "
-            f"{plural(len(plan.goal_ids), 'цель', 'цели', 'целей')} для лидов, "
-            f"{len(missing)} из них не выбраны в боте основными: лиды могут не совпадать."
+            f"Не выбраны в боте основными {len(missing)} из {len(plan.goal_ids)} "
+            f"{plural(len(plan.goal_ids), 'цели', 'целей', 'целей')} медиаплана: "
+            "лиды могут не совпадать."
         )
     if plan.lead_definition:
         notes.append("Лид по медиаплану: " + plan.lead_definition.rstrip(".") + ".")
@@ -151,54 +151,63 @@ def share(value, whole):
 
 
 def plan_fact_text(result):
+    """Blocks with bold headings: a manager scans spend, leads, price and reward."""
     lines = [
-        f"📅 **Медиаплан · {month_name(result.month)}** · прошло {result.elapsed} из "
-        f"{result.days} дн."
+        f"📅 **Медиаплан · {month_name(result.month)}**",
+        f"Прошло {result.elapsed} из {result.days} дн. Прогноз — текущий темп до конца месяца.",
     ]
     expected = Decimal(result.elapsed) / result.days * 100
     if result.budget and result.spend is not None:
-        lines.append(
-            f"Расход: **{money(result.spend)}** из {money(result.budget)} "
-            f"({share(result.spend, result.budget)}, по темпу дней — "
-            f"{number_text(expected, 0)}%) · прогноз на месяц "
-            f"**{money(result.spend_forecast)} ({share(result.spend_forecast, result.budget)})**"
-        )
+        lines += [
+            "",
+            "**💰 Расход**",
+            f"{money(result.spend)} из {money(result.budget)} — **{share(result.spend, result.budget)}**"
+            f" (по дням прошло {number_text(expected, 0)}%)",
+            f"Прогноз: **{money(result.spend_forecast)} — "
+            f"{share(result.spend_forecast, result.budget)}** плана",
+        ]
     if result.leads_plan and result.leads is not None:
-        lines.append(
-            f"Лиды: **{count(result.leads)}** из {count(result.leads_target)} "
-            f"({share(result.leads, result.leads_target)}) · прогноз "
-            f"**{count(result.leads_forecast)} ({share(result.leads_forecast, result.leads_target)})** "
-            f"{result.level}"
-        )
+        lines += [
+            "",
+            f"**🎯 Лиды** {result.level}",
+            f"{count(result.leads)} из {count(result.leads_target)} — "
+            f"**{share(result.leads, result.leads_target)}**",
+            f"Прогноз: **{count(result.leads_forecast)} — "
+            f"{share(result.leads_forecast, result.leads_target)}** плана",
+        ]
         if result.leads_target != result.leads_plan:
             lines.append(
-                f"План по лидам увеличен с {count(result.leads_plan)}: прогноз расхода выше "
-                "бюджета, а по условиям медиаплана лиды растут пропорционально."
+                f"План увеличен с {count(result.leads_plan)}: прогноз расхода выше бюджета, "
+                "а по условиям медиаплана лиды растут пропорционально."
             )
     if result.budget and result.leads_plan and result.leads:
         cpl, planned = result.spend / result.leads, result.budget / result.leads_plan
-        lines.append(
-            f"Цена лида: **{money(cpl)}** · план {money(planned)} "
-            f"({'+' if cpl >= planned else '−'}{number_text(abs(percent(cpl - planned, planned)), 0)}%)"
-        )
+        sign = "+" if cpl >= planned else "−"
+        lines += [
+            "",
+            "**💵 Цена лида**",
+            f"**{money(cpl)}** · план {money(planned)} "
+            f"({sign}{number_text(abs(percent(cpl - planned, planned)), 0)}%)",
+        ]
     step = result.reward_step
     if step:
         top = result.rewards.get("100")
-        lines.append(
-            f"По прогнозу — ступень «до {step[0]}%» шкалы KPI: {money(step[1])}"
-            + (f" (при 100% — {money(top)})" if top and step[0] != "100" else "")
-            + "."
-        )
+        lines += [
+            "",
+            "**🏆 Вознаграждение по шкале KPI**",
+            f"По прогнозу ступень «до {step[0]}%»: **{money(step[1])}**"
+            + (f" · при 100% — {money(top)}" if top and step[0] != "100" else ""),
+        ]
+    conditions = []
     if result.spend is None:
-        lines.append("Факт Директа за месяц сейчас недоступен: сравнение неполное.")
+        conditions.append("Факт Директа за месяц сейчас недоступен: сравнение неполное.")
     elif result.leads is None and result.leads_plan:
-        lines.append("Лиды не посчитаны: выберите основные цели в «Данные и цели».")
+        conditions.append("Лиды не посчитаны: выберите основные цели в «Данные и цели».")
     elif result.elapsed < result.days:
-        lines.append(
-            "Прогноз — текущий темп, растянутый на весь месяц; конверсии последних дней "
-            "ещё дополняются."
-        )
-    lines += result.notes
+        conditions.append("Конверсии последних дней ещё дополняются.")
+    conditions += result.notes
+    if conditions:
+        lines += ["", "**ℹ️ Условия**", *(f"• {item}" for item in conditions)]
     return "\n".join(lines)
 
 
@@ -216,9 +225,9 @@ def plan_fact_line(result):
 
 def plan_preview(plan, limit=14):
     """What was read from the sheet, for the manager to confirm before saving."""
-    lines = []
+    lines = ["**План по месяцам**"]
     for month in plan.months[:limit]:
-        parts = [month_name(month.month).capitalize()]
+        parts = [f"**{month_name(month.month).capitalize()}**"]
         if month.budget is not None:
             parts.append(f"бюджет {money(month.budget)}")
         if month.leads is not None:
@@ -229,16 +238,17 @@ def plan_preview(plan, limit=14):
     if len(plan.months) > limit:
         lines.append(f"…и ещё {len(plan.months) - limit} мес.")
     vat = {"without": "без НДС", "with": "с НДС", "unknown": "НДС не указан"}[plan.budget_vat]
-    lines.append(f"Бюджет: {vat}.")
+    conditions = [f"Бюджет: {vat}."]
     if any(month.rewards for month in plan.months):
-        lines.append("Есть шкала вознаграждения по выполнению KPI.")
+        conditions.append("Есть шкала вознаграждения по выполнению KPI.")
     if plan.leads_scale_with_budget:
-        lines.append("План по лидам растёт вместе с бюджетом.")
+        conditions.append("План по лидам растёт вместе с бюджетом.")
     if plan.lead_definition:
-        lines.append("Лид: " + plan.lead_definition)
+        conditions.append("Лид: " + plan.lead_definition)
     if plan.goal_ids:
-        lines.append("Цели Метрики из плана: " + ", ".join(plan.goal_ids[:12]))
-    lines += plan.notes[:3]
+        conditions.append("Цели Метрики из плана: " + ", ".join(plan.goal_ids[:12]))
+    conditions += plan.notes[:3]
+    lines += ["", "**Условия плана**", *(f"• {item}" for item in conditions)]
     return "\n".join(lines)
 
 

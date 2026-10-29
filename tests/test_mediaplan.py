@@ -52,7 +52,9 @@ def test_model_reply_becomes_a_validated_plan():
     assert october.budget == Decimal("4676246") and october.leads == 5257
     assert october.rewards["90"] == Decimal("136218")
     assert plan.goal_ids == ["37618142", "29872089"]
-    assert "Октябрь 2026 · бюджет 4,68 млн ₽ · лиды 5 257" in plan_preview(plan)
+    preview = plan_preview(plan)
+    assert "**Октябрь 2026** · бюджет 4,68 млн ₽ · лиды 5 257" in preview
+    assert "**Условия плана**" in preview
     with pytest.raises(MediaPlanError, match="не нашлось плана"):
         parse_reply('{"error": "нет бюджета по месяцам"}')
     with pytest.raises(MediaPlanError):
@@ -128,9 +130,10 @@ def test_plan_fact_forecasts_month_and_reward_step():
     assert result.leads_target == Decimal("5257")
     assert result.reward_step == ("90", Decimal("136218"))
     text = plan_fact_text(result)
-    assert "Медиаплан · октябрь 2026" in text and "прошло 28 из 31" in text
-    assert "ступень «до 90%»" in text and "при 100% — 181,6 тыс. ₽" in text
-    assert "1 из них не выбраны в боте" in text
+    assert "**Медиаплан · октябрь 2026**" in text and "Прошло 28 из 31" in text
+    assert "**💰 Расход**" in text and "**🎯 Лиды** 🟡" in text
+    assert "ступень «до 90%»: **136,2 тыс. ₽** · при 100% — 181,6 тыс. ₽" in text
+    assert "Не выбраны в боте основными 1 из 2 целей" in text
     assert (
         plan_fact_line(result) == "медиаплан (октябрь, прогноз): расход 93% плана, лиды 86% плана"
     )
@@ -139,7 +142,7 @@ def test_plan_fact_forecasts_month_and_reward_step():
         plan, spend=Decimal("5000000"), leads=Decimal("4100"), today=date(2026, 10, 29)
     )
     assert over.leads_target > Decimal("5257")
-    assert "План по лидам увеличен" in plan_fact_text(over)
+    assert "План увеличен с 5 257" in plan_fact_text(over)
     # On the 1st the whole previous month is judged.
     assert plan_fact(plan, spend=1, leads=1, today=date(2026, 11, 1)).elapsed == 31
     assert plan_fact(plan, spend=1, leads=1, today=date(2027, 3, 5)) is None
