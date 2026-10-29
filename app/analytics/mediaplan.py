@@ -17,6 +17,8 @@ from app.reporting.formatter import number_text, plural
 
 logger = logging.getLogger(__name__)
 
+# Visits whose last significant source is a Yandex Direct ad.
+DIRECT_VISITS = "ym:s:lastsignAdvEngine=='ya_direct'"
 # Russian VAT since 2026; Direct reports spend without it.
 VAT = Decimal("1.22")
 MONTHS = (
@@ -132,8 +134,10 @@ class PlanFact:
         return "🟢" if value >= 95 else "🟡" if value >= 80 else "🔴"
 
 
-def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=()):
-    """Month to date through yesterday; on the 1st that is the whole previous month."""
+def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=(), lead_goals=None):
+    """Month to date through yesterday; on the 1st that is the whole previous month.
+    ``lead_goals``: Metrica goals agreed as leads for this client; leads then come from
+    them and the plan's own lead definition no longer warns about unseen sources."""
     yesterday = (today or today_moscow()) - timedelta(days=1)
     key = f"{yesterday:%Y-%m}"
     month = plan.month(key)
@@ -144,15 +148,22 @@ def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=()):
     if budget is not None and plan.budget_vat == "with":
         budget = budget / VAT
         notes.append("Бюджет плана указан с НДС: для сравнения с Директом пересчитан без НДС 22%.")
-    missing = [goal for goal in plan.goal_ids if goal not in set(main_goal_ids)]
-    if plan.goal_ids and missing:
+    if lead_goals:
         notes.append(
-            f"Не выбраны в боте основными {len(missing)} из {len(plan.goal_ids)} "
-            f"{plural(len(plan.goal_ids), 'цели', 'целей', 'целей')} медиаплана: "
-            "лиды могут не совпадать."
+            f"Лиды — достижения {len(lead_goals)} "
+            f"{plural(len(lead_goals), 'цели', 'целей', 'целей')} Метрики в визитах из "
+            "Директа (последний значимый переход), как настроено для этого клиента."
         )
-    if plan.lead_definition:
-        notes.append("Лид по медиаплану: " + plan.lead_definition.rstrip(".") + ".")
+    else:
+        missing = [goal for goal in plan.goal_ids if goal not in set(main_goal_ids)]
+        if plan.goal_ids and missing:
+            notes.append(
+                f"Не выбраны в боте основными {len(missing)} из {len(plan.goal_ids)} "
+                f"{plural(len(plan.goal_ids), 'цели', 'целей', 'целей')} медиаплана: "
+                "лиды могут не совпадать. Настройте «Цели для лидов» в медиаплане."
+            )
+        if plan.lead_definition:
+            notes.append("Лид по медиаплану: " + plan.lead_definition.rstrip(".") + ".")
     return PlanFact(
         month=key,
         elapsed=yesterday.day,
@@ -164,7 +175,7 @@ def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=()):
         notes=notes,
         rewards=month.rewards,
         scale_with_budget=plan.leads_scale_with_budget,
-        unseen=unseen_sources(plan.lead_definition),
+        unseen=[] if lead_goals else unseen_sources(plan.lead_definition),
     )
 
 
@@ -310,20 +321,64 @@ class MediaPlans:
         yesterday = (today or today_moscow()) - timedelta(days=1)
         if plan.month(f"{yesterday:%Y-%m}") is None:
             return None
-        snapshot = await self.checks.snapshot(
-            client, DateRange(start=yesterday.replace(day=1), end=yesterday), quick=False
-        )
+        month = DateRange(start=yesterday.replace(day=1), end=yesterday)
+        snapshot = await self.checks.snapshot(client, month, quick=False)
         spend = leads = None
         if snapshot.direct.status == DataStatus.OK:
             metrics = snapshot_metrics(snapshot)
             spend, leads = metrics.spend, metrics.conversions
+        lead_goals = (await self.repository.media_plan(client.id) or {}).get("lead_goal_ids")
+        if lead_goals:
+            try:
+                leads = await self.metrica_leads(client, month, lead_goals)
+            except Exception as exc:
+                logger.warning(
+                    "Media plan leads failed client=%s (%s)", client.id, type(exc).__name__
+                )
+                leads = None
         return plan_fact(
             plan,
             spend=spend,
             leads=leads,
             today=today,
             main_goal_ids=client.direct.main_goal_ids,
+            lead_goals=lead_goals,
         )
+
+    async def metrica_leads(self, client, period, goal_ids):
+        """Reaches of the lead goals in visits from Direct. Metrica, not Direct: a plan
+        may count more than the ten goals a Direct report takes, and agencies read
+        leads in Metrica."""
+        counters = client.metrica.selected_counter_ids()
+        if not counters:
+            return None
+        catalog = await self.repository.client_counters(client.id)
+        owner = {
+            str(goal["id"]): counter["id"]
+            for counter in catalog
+            if counter["id"] in counters
+            for goal in counter["goals"] or []
+        }
+        by_counter = {}
+        for goal in goal_ids:
+            by_counter.setdefault(owner.get(goal, counters[0]), []).append(goal)
+        total = Decimal(0)
+        for counter, goals in by_counter.items():
+            # The Reporting API takes at most 20 metrics per query.
+            for start in range(0, len(goals), 20):
+                data = await self.checks.provider.metrica_query(
+                    client,
+                    counter,
+                    period.start,
+                    period.end,
+                    metrics=[f"ym:s:goal{goal}reaches" for goal in goals[start : start + 20]],
+                    dimensions=[],
+                    filters=DIRECT_VISITS,
+                    sort=None,
+                    limit=1,
+                )
+                total += sum(Decimal(str(value or 0)) for value in data["totals"].values())
+        return total
 
     async def digest_lines(self, clients):
         """Client id → media plan pace line for the weekly digest."""

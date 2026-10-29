@@ -269,3 +269,58 @@ async def test_report_asks_for_media_plan_then_saves_and_compares(runtime, monke
         await click("Не спрашивать по этому клиенту")
         await runtime.jobs.close()
         assert (await runtime.checks.repository.media_plan("west_export"))["dismissed"]
+
+
+async def test_agreed_lead_goals_are_counted_in_metrica_direct_visits(runtime, client):
+    from app.analytics.periods import today_moscow
+
+    month = f"{today_moscow() - timedelta(days=1):%Y-%m}"
+    plan = {**GRAND, "months": [{**GRAND["months"][0], "month": month}]}
+    repo = runtime.checks.repository
+    await repo.update_media_plan(
+        client.id, url=SHEET, plan=parse_reply(json.dumps(plan)).model_dump(mode="json")
+    )
+    goals = [str(100000 + i) for i in range(23)]
+    await repo.update_media_plan(client.id, lead_goal_ids=goals)
+    queries = []
+
+    async def metrica_query(client_, counter_id, start, end, **query):
+        queries.append(query)
+        return {"totals": {metric: 10 for metric in query["metrics"]}}
+
+    runtime.checks.provider.metrica_query = metrica_query
+    result = await runtime.mediaplans.progress(client)
+    # 23 goals: two queries (20 + 3 metrics), only visits from Direct.
+    assert [len(q["metrics"]) for q in queries] == [20, 3]
+    assert all(q["filters"] == "ym:s:lastsignAdvEngine=='ya_direct'" for q in queries)
+    assert result.leads == 230 and result.unseen == []
+    text = plan_fact_text(result)
+    assert "бот их не видит" not in text and "Цена лида" in text
+    assert "Лиды — достижения 23 целей Метрики в визитах из Директа" in text
+
+
+async def test_lead_goals_are_set_up_in_the_menu(runtime, client):
+    from tests.test_manager_tools import Chat
+
+    await runtime.checks.repository.update_media_plan(
+        client.id, url=SHEET, plan=parse_reply(json.dumps(GRAND)).model_dump(mode="json")
+    )
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        chat = Chat(runtime, bot, session)
+        await chat.say("/menu")
+        await chat.press("Клиенты")
+        await chat.press("West")
+        await chat.press("Медиаплан")
+        assert "Конверсии Директа по основным целям бота" in session.sent[-1].text
+        await chat.press("Цели для лидов")
+        await chat.press("Взять цели из медиаплана (2)")
+        record = await runtime.checks.repository.media_plan(client.id)
+        assert record["lead_goal_ids"] == ["37618142", "29872089"]
+        await chat.press("Добавить цели по ID")
+        await chat.say("Клик по номеру 134968972, заказ 27612824")
+        record = await runtime.checks.repository.media_plan(client.id)
+        assert record["lead_goal_ids"] == ["37618142", "29872089", "134968972", "27612824"]
+        assert "Сейчас целей: 4" in session.sent[-1].text
+        await chat.press("Сбросить настройку")
+        assert (await runtime.checks.repository.media_plan(client.id))["lead_goal_ids"] is None

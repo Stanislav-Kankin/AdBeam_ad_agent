@@ -193,6 +193,9 @@ class MediaPlanRecord(Base):
     # model when nobody edited the sheet.
     source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # Metrica goals counted as leads for this plan, agreed per client (e.g. phone
+    # clicks + orders + favourites); None — the bot's main goals in Direct.
+    lead_goal_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # "Do not ask again": reports run without the media plan question.
     dismissed: Mapped[bool] = mapped_column(Boolean, default=False)
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

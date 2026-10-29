@@ -1,5 +1,6 @@
 """Owner-bound inline navigation over clients authorized for the current chat."""
 
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -84,6 +85,43 @@ def install_menu(router, runtime, launch, launch_chart):
     awaiting_user = {}
     awaiting_target = {}
     awaiting_plan = {}
+    awaiting_goals = {}
+
+    @router.message(
+        lambda message: (
+            message.text is not None and (message.chat.id, message.from_user.id) in awaiting_goals
+        )
+    )
+    async def lead_goals_input(message):
+        key = (message.chat.id, message.from_user.id)
+        started, client_id, mode = awaiting_goals.pop(key)
+        user = message.from_user.id
+        if not can_configure(user):
+            return
+        if message.text.strip() in ("/cancel", "/menu", "/start"):
+            await show(message, user)
+            return
+        if monotonic() - started > 600:
+            await message.answer("Время ввода истекло. Откройте «Цели для лидов» заново.")
+            return
+        found = list(dict.fromkeys(re.findall(r"\d{5,12}", message.text)))
+        if not found:
+            awaiting_goals[key] = (started, client_id, mode)
+            await message.answer(
+                "Не нашёл ID целей. Пришлите числа через запятую, например: "
+                "134968972, 27612824. /cancel — отмена."
+            )
+            return
+        record = await runtime.checks.repository.media_plan(client_id) or {}
+        goals = list(
+            dict.fromkeys(
+                [*(record.get("lead_goal_ids") or []), *found] if mode == "add" else found
+            )
+        )[:40]
+        await runtime.checks.repository.update_media_plan(
+            client_id, actor=user, lead_goal_ids=goals
+        )
+        await show(message, user, screen="lead_goals", client_id=client_id)
 
     async def answer_markdown(message, text):
         for part, entities in markdown_parts(text):
@@ -702,7 +740,16 @@ def install_menu(router, runtime, launch, launch_chart):
                     "Бот перечитывает таблицу раз в сутки: правки в ней подхватятся сами.\n\n"
                     + plan_preview(plan.model_copy(update={"months": upcoming}))
                 )
+                lead_goals = record.get("lead_goal_ids") or []
+                text += "\n\n**Как считаются лиды**\n" + (
+                    f"Цели Метрики ({len(lead_goals)}) в визитах из Директа — настроено вручную."
+                    if lead_goals
+                    else "Конверсии Директа по основным целям бота. Если агентство считает "
+                    "лиды иначе (звонки, заказы, свой набор целей), настройте «Цели для лидов»."
+                )
                 row("📊 План/факт за месяц", "mediaplan_progress", client_id=client_id)
+                if can_configure(user):
+                    row("🎯 Цели для лидов", "lead_goals", client_id=client_id)
             else:
                 text += (
                     "\nМедиаплан не загружен. С ним отчёт по клиенту покажет выполнение плана "
@@ -720,6 +767,43 @@ def install_menu(router, runtime, launch, launch_chart):
                     row("🔄 Перечитать таблицу", "mediaplan_refresh", client_id=client_id)
                     row("🗑 Убрать медиаплан", "mediaplan_remove", client_id=client_id)
             row("← К отчёту", "report", client_id=client_id, page=page)
+        elif screen == "lead_goals":
+            if not can_configure(user):
+                raise PermissionError
+            client = runtime.registry.require(chat, client_id)
+            record = await runtime.checks.repository.media_plan(client_id) or {}
+            plan = MediaPlan.model_validate(record["plan"]) if record.get("plan") else None
+            goals = record.get("lead_goal_ids") or []
+            names = {
+                str(goal["id"]): goal["name"]
+                for counter in await runtime.checks.repository.client_counters(client_id)
+                for goal in counter["goals"] or []
+            }
+            text = badge + (
+                f"🎯 **Цели для лидов · {client.name}**\n"
+                "Какие цели Метрики считать лидами при сравнении с медиапланом. Бот сложит их "
+                "достижения в визитах из Директа (последний значимый переход). Например, для "
+                "звонков — «Клик по номеру телефона», для магазина — «Оформление заказа» и "
+                "избранные цели.\n"
+            )
+            if goals:
+                text += f"\n**Сейчас целей: {len(goals)}**\n" + "\n".join(
+                    f"• {names.get(goal, 'цель')} · {goal}" for goal in goals
+                )
+            else:
+                text += "\nСейчас не настроено: лиды — конверсии Директа по основным целям бота."
+            if plan and plan.goal_ids:
+                row(
+                    f"📋 Взять цели из медиаплана ({len(plan.goal_ids)})",
+                    "set_lead_goals",
+                    client_id=client_id,
+                    source="plan",
+                )
+            row("➕ Добавить цели по ID", "enter_lead_goals", client_id=client_id, mode="add")
+            row("✏️ Задать список заново", "enter_lead_goals", client_id=client_id, mode="replace")
+            if goals:
+                row("↩️ Сбросить настройку", "set_lead_goals", client_id=client_id, source="none")
+            row("← Медиаплан", "mediaplan", client_id=client_id)
         elif screen == "mediaplan_missing":
             client = runtime.registry.require(chat, client_id)
             text = badge + (
@@ -848,6 +932,9 @@ def install_menu(router, runtime, launch, launch_chart):
                 "set_tolerance",
                 "enter_target",
                 "unsnooze",
+                "lead_goals",
+                "set_lead_goals",
+                "enter_lead_goals",
                 "enter_mediaplan",
                 "mediaplan_save",
                 "mediaplan_refresh",
@@ -1008,6 +1095,27 @@ def install_menu(router, runtime, launch, launch_chart):
             field = "kpi" if action == "set_kpi" else "kpi_change_tolerance_percent"
             await save_targets(client, {field: kwargs["value"]}, user)
             await show(callback.message, user, screen="kpi", edit=True, client_id=client.id)
+        elif action == "set_lead_goals":
+            goals = None
+            if kwargs["source"] == "plan":
+                record = await runtime.checks.repository.media_plan(client_id) or {}
+                goals = MediaPlan.model_validate(record["plan"]).goal_ids or None
+            await runtime.checks.repository.update_media_plan(
+                client_id, actor=user, lead_goal_ids=goals
+            )
+            await show(callback.message, user, screen="lead_goals", edit=True, client_id=client_id)
+        elif action == "enter_lead_goals":
+            awaiting_goals[(chat, user)] = (monotonic(), client_id, kwargs["mode"])
+            await callback.message.answer(
+                "Пришлите ID целей Метрики через запятую, например: 134968972, 27612824. "
+                "ID видны в Метрике → Цели. "
+                + (
+                    "Они добавятся к текущему списку."
+                    if kwargs["mode"] == "add"
+                    else "Они заменят текущий список."
+                )
+                + " /cancel — отмена."
+            )
         elif action == "unsnooze":
             await runtime.checks.repository.unsnooze_risk(client_id, kwargs["key"])
             await show(callback.message, user, screen="kpi", edit=True, client_id=client_id)
