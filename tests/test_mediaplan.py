@@ -116,7 +116,9 @@ async def test_model_gets_rules_as_system_and_failures_are_explained():
 
 
 def test_plan_fact_forecasts_month_and_reward_step():
-    plan = MediaPlan.model_validate(parse_reply(json.dumps(GRAND)).model_dump(mode="json"))
+    # Leads counted by Metrica goals only: the bot sees all of them.
+    payload = {**GRAND, "lead_definition": "достижение избранной цели Метрики"}
+    plan = MediaPlan.model_validate(parse_reply(json.dumps(payload)).model_dump(mode="json"))
     # 28 of 31 October days are complete on the 29th.
     result = plan_fact(
         plan,
@@ -128,7 +130,7 @@ def test_plan_fact_forecasts_month_and_reward_step():
     assert (result.elapsed, result.days) == (28, 31)
     assert round(result.leads_forecast) == 4539
     assert result.leads_target == Decimal("5257")
-    assert result.reward_step == ("90", Decimal("136218"))
+    assert result.reward_step == ("90", Decimal("136218"), False)
     text = plan_fact_text(result)
     assert "**Медиаплан · октябрь 2026**" in text and "Прошло 28 из 31" in text
     assert "**💰 Расход**" in text and "**🎯 Лиды** 🟡" in text
@@ -146,6 +148,32 @@ def test_plan_fact_forecasts_month_and_reward_step():
     # On the 1st the whole previous month is judged.
     assert plan_fact(plan, spend=1, leads=1, today=date(2026, 11, 1)).elapsed == 31
     assert plan_fact(plan, spend=1, leads=1, today=date(2027, 3, 5)) is None
+
+
+def test_leads_the_bot_cannot_see_are_flagged_and_reward_is_not_guessed():
+    # Grand Line counts Calltouch calls as leads: neither Direct nor Metrica goals have them.
+    plan = parse_reply(json.dumps(GRAND))
+    result = plan_fact(
+        plan, spend=Decimal("3540000"), leads=Decimal("327"), today=date(2026, 10, 29)
+    )
+    text = plan_fact_text(result)
+    assert "входят звонки Calltouch — бот их не видит" in text
+    assert "**🎯 Лиды** ⚪" in text and "Вознаграждение" not in text
+    assert plan_fact_line(result).endswith("лиды: часть не видна боту (звонки Calltouch)")
+    # A scale read only from 90% up: 7% is below it, the bot does not pick a step.
+    payload = {
+        **GRAND,
+        "lead_definition": "",
+        "months": [{**GRAND["months"][0], "rewards": {"90": "136218", "100": "181625"}}],
+    }
+    result = plan_fact(
+        parse_reply(json.dumps(payload)),
+        spend=Decimal("3540000"),
+        leads=Decimal("327"),
+        today=date(2026, 10, 29),
+    )
+    assert result.reward_step == ("90", Decimal("136218"), True)
+    assert "Прогноз ниже нижней ступени шкалы" in plan_fact_text(result)
 
 
 def test_plan_with_vat_is_compared_without_it():

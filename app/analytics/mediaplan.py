@@ -35,6 +35,21 @@ MONTHS = (
 )
 
 
+# Lead sources a plan may count that reach neither Direct nor Metrica goals.
+UNSEEN_SOURCES = {
+    "calltouch": "звонки Calltouch",
+    "колтач": "звонки Calltouch",
+    "crm": "данные CRM",
+    "црм": "данные CRM",
+    "roistat": "данные Roistat",
+}
+
+
+def unseen_sources(definition):
+    text = (definition or "").casefold()
+    return list(dict.fromkeys(name for word, name in UNSEEN_SOURCES.items() if word in text))
+
+
 def month_name(key):
     year, month = key.split("-")
     return f"{MONTHS[int(month) - 1]} {year}"
@@ -69,6 +84,8 @@ class PlanFact:
     notes: list[str] = field(default_factory=list)
     rewards: dict[str, Decimal] = field(default_factory=dict)
     scale_with_budget: bool = False
+    # Sources the plan counts as leads that the bot cannot see (Calltouch, CRM).
+    unseen: list[str] = field(default_factory=list)
 
     @property
     def spend_forecast(self):
@@ -95,17 +112,22 @@ class PlanFact:
 
     @property
     def reward_step(self):
-        """Step "до N%" of the scale the forecast falls into, with its amount."""
-        if not self.rewards or self.completion is None:
+        """(step "до N%", amount, below) for the forecast; below — under the lowest step
+        the sheet gave, where the bot cannot tell the step. None when leads are not
+        fully visible: a reward from undercounted leads would mislead."""
+        if not self.rewards or self.completion is None or self.unseen:
             return None
         steps = sorted(self.rewards, key=int)
+        gap = int(steps[1]) - int(steps[0]) if len(steps) > 1 else 10
+        if self.completion <= int(steps[0]) - gap:
+            return steps[0], self.rewards[steps[0]], True
         step = next((s for s in steps if self.completion <= int(s)), steps[-1])
-        return step, self.rewards[step]
+        return step, self.rewards[step], False
 
     @property
     def level(self):
         value = self.completion
-        if value is None:
+        if value is None or self.unseen:
             return "⚪"
         return "🟢" if value >= 95 else "🟡" if value >= 80 else "🔴"
 
@@ -142,6 +164,7 @@ def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=()):
         notes=notes,
         rewards=month.rewards,
         scale_with_budget=plan.leads_scale_with_budget,
+        unseen=unseen_sources(plan.lead_definition),
     )
 
 
@@ -175,6 +198,12 @@ def plan_fact_text(result):
             f"Прогноз: **{count(result.leads_forecast)} — "
             f"{share(result.leads_forecast, result.leads_target)}** плана",
         ]
+        if result.unseen:
+            lines.append(
+                f"⚠️ В лиды медиаплана входят {' и '.join(result.unseen)} — бот их не видит "
+                "и считает только конверсии целей Метрики из Директа. Факт лидов занижен, "
+                "процент выполнения неточный."
+            )
         if result.leads_target != result.leads_plan:
             lines.append(
                 f"План увеличен с {count(result.leads_plan)}: прогноз расхода выше бюджета, "
@@ -192,11 +221,16 @@ def plan_fact_text(result):
     step = result.reward_step
     if step:
         top = result.rewards.get("100")
+        reward = (
+            f"Прогноз ниже нижней ступени шкалы, которая есть в плане (до {step[0]}% — "
+            f"{money(step[1])})"
+            if step[2]
+            else f"По прогнозу ступень «до {step[0]}%»: **{money(step[1])}**"
+        )
         lines += [
             "",
             "**🏆 Вознаграждение по шкале KPI**",
-            f"По прогнозу ступень «до {step[0]}%»: **{money(step[1])}**"
-            + (f" · при 100% — {money(top)}" if top and step[0] != "100" else ""),
+            reward + (f" · при 100% — {money(top)}" if top and step[0] != "100" else ""),
         ]
     conditions = []
     if result.spend is None:
@@ -216,7 +250,9 @@ def plan_fact_line(result):
     parts = []
     if result.budget and result.spend_forecast is not None:
         parts.append(f"расход {share(result.spend_forecast, result.budget)} плана")
-    if result.completion is not None:
+    if result.unseen:
+        parts.append("лиды: часть не видна боту (" + ", ".join(result.unseen) + ")")
+    elif result.completion is not None:
         parts.append(f"лиды {number_text(result.completion, 0)}% плана")
     if not parts:
         return None
