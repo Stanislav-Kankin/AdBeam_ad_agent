@@ -87,6 +87,7 @@ def build_runtime(settings):
         http,
     )
     runtime.mediaplans = MediaPlans(MediaPlanReader(http, llm), checks)
+    checks.lead_source = runtime.mediaplans.lead_source
     if settings.app_mode == "production" and settings.yandex_discover_clients:
         runtime.discovery = AccountDiscovery(transport, registry, settings, repo)
         runtime.inventory = MetricaInventory(transport, repo, registry)

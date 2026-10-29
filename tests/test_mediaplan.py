@@ -334,3 +334,47 @@ async def test_lead_goals_are_set_up_in_the_menu(runtime, client):
         assert "Сейчас целей: 4" in session.sent[-1].text
         await chat.press("Сбросить настройку")
         assert (await runtime.checks.repository.media_plan(client.id))["lead_goal_ids"] is None
+
+
+async def test_card_counts_conversions_by_agreed_lead_goals(runtime, client):
+    from app.analytics.periods import make_period
+    from app.domain.reports import CheckMode, TriggerSource
+    from app.reporting.formatter import card
+
+    async def report():
+        reports, _ = await runtime.checks.run_check(
+            [client.id],
+            make_period("7d"),
+            CheckMode.STANDARD,
+            TriggerSource.INTERNAL,
+            chat_id=123456789,
+        )
+        return reports[0]
+
+    before = await report()
+    await runtime.checks.repository.update_media_plan(client.id, lead_goal_ids=["11", "22"])
+
+    async def metrica_query(client_, counter_id, start, end, **query):
+        return {"totals": {metric: 500 for metric in query["metrics"]}}
+
+    runtime.checks.provider.metrica_query = metrica_query
+    after = await report()
+    assert after.current.conversions == 1000 and after.previous.conversions == 1000
+    assert after.current.cpa == after.current.spend / 1000
+    text = card(after)
+    assert "Конверсии и CPA — по 2 целям для лидов в визитах из Директа" in text
+    # Campaigns are still compared with the account in Direct's own goals: the
+    # agreed leads must not make every campaign look many times too expensive.
+    assert text.count("раза выше среднего") == card(before).count("раза выше среднего")
+    assert after.targets["direct_cpa"] == before.current.cpa
+
+
+def test_plan_amounts_with_vat_are_shown_with_vat_too():
+    payload = {**GRAND, "budget_vat": "with", "lead_definition": ""}
+    plan = parse_reply(json.dumps(payload))
+    result = plan_fact(
+        plan, spend=Decimal("3540000"), leads=Decimal("3876"), today=date(2026, 10, 29)
+    )
+    text = plan_fact_text(result)
+    assert "из 3,83 млн ₽ (4,68 млн ₽ с НДС)" in text
+    assert "план 729 ₽ без НДС (890 ₽ с НДС)" in text

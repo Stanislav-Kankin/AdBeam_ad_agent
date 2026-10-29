@@ -59,6 +59,18 @@ def snapshot_metrics(snapshot, *, healthy=True):
     return metrics
 
 
+def with_conversions(metrics, conversions):
+    """Metrics with another count of conversions; DRR is kept as it was judged."""
+    totals = Totals(
+        spend=metrics.spend,
+        impressions=metrics.impressions,
+        clicks=metrics.clicks,
+        conversions=conversions,
+        revenue=metrics.revenue,
+    )
+    return calculate(totals).model_copy(update={"drr": metrics.drr})
+
+
 def amount(value) -> Decimal:
     """Numeric sort key. JSON payloads carry Decimals as strings, so comparing them
     directly sorted "9000" above "10000" and failed with TypeError against a 0."""
@@ -104,6 +116,9 @@ class CheckService:
     def __init__(self, registry, provider, repository):
         self.registry, self.provider, self.repository = registry, provider, repository
         self.semaphore = asyncio.Semaphore(3)
+        # (client, period) → (current leads, previous leads, label) or None; set by the
+        # runtime from media plans with agreed lead goals.
+        self.lead_source = None
         self.schedule_semaphore = asyncio.Semaphore(1)
         self.goals_checked = {}
 
@@ -925,6 +940,16 @@ class CheckService:
             current, previous = await self.snapshots(client, period, mode)
             health = tracking_health(client, current, previous, period)
             a, b = snapshot_metrics(current, healthy=health["healthy"]), snapshot_metrics(previous)
+            # Campaign checks compare a campaign with the account in Direct's own goals.
+            direct_cpa = a.cpa
+            lead_label = None
+            if self.lead_source and health["healthy"]:
+                counted = await self.lead_source(client, period)
+                if counted:
+                    # The client's agreed leads (e.g. phone clicks, orders, favourites in
+                    # Metrica) make the account KPI, the same as in its media plan.
+                    current_leads, previous_leads, lead_label = counted
+                    a, b = with_conversions(a, current_leads), with_conversions(b, previous_leads)
             signals = evaluate(client, a, b, period, health, current)
             checks = {
                 "доступность": "ok" if health["healthy"] else "insufficient",
@@ -1000,9 +1025,10 @@ class CheckService:
                 # A segment only counts as spending "without conversions" once it spent the
                 # price of several average conversions of this account: 3 000 ₽ is noise
                 # for an account with a 2 000 ₽ CPA and millions in spend.
-                if a.cpa is not None:
+                if direct_cpa is not None:
                     threshold = max(
-                        threshold, a.cpa * Decimal(str(client.targets.no_conversion_cpa_multiple))
+                        threshold,
+                        direct_cpa * Decimal(str(client.targets.no_conversion_cpa_multiple)),
                     )
                 if mature and health["healthy"]:
                     for row in current.direct.rows:
@@ -1190,6 +1216,8 @@ class CheckService:
                     "target_drr": client.targets.target_drr,
                     "kpi_change_tolerance_percent": client.targets.kpi_change_tolerance_percent,
                     "excluded_campaigns": client.targets.excluded_campaigns,
+                    "lead_source": lead_label,
+                    "direct_cpa": direct_cpa,
                     "snoozed": [
                         {"key": s["key"], "label": s["label"], "until": str(s["until"].date())}
                         for s in snoozed

@@ -202,7 +202,10 @@ def contextual_types(report):
 def expensive_campaigns(report, limit=3):
     """Campaigns whose CPA is far above the account average and that carry real spend:
     (risk line, campaign name). Campaigns a specialist hid for now are skipped."""
-    account_cpa, spend = report.current.cpa, report.current.spend
+    # Campaign CPAs are in Direct's main goals: compare them with the account in the
+    # same goals, not with agreed leads counted in Metrica.
+    account_cpa = report.targets.get("direct_cpa", report.current.cpa)
+    spend = report.current.spend
     if account_cpa is None or not spend:
         return []
     hidden = {item["key"] for item in report.targets.get("snoozed") or []}
@@ -476,7 +479,12 @@ def card(report: ClientReport, summary: str | None = None) -> str:
         )
         footer += f" Скрыты специалистом: {names}; вернуть — в «KPI проекта»."
     lines += ["", footer]
-    if report.goals_source in ("favorites", "campaigns") and report.main_goal_ids:
+    if report.targets.get("lead_source"):
+        lines.append(
+            f"Конверсии и CPA — {report.targets['lead_source']}, как в медиаплане; "
+            "кампании — по основным целям Директа."
+        )
+    elif report.goals_source in ("favorites", "campaigns") and report.main_goal_ids:
         named = [
             g["name"]
             for g in report.goal_metrics

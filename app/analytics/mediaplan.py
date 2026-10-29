@@ -97,6 +97,8 @@ class PlanFact:
     breakdown: dict[str, Decimal] = field(default_factory=dict)
     # (monday or the 1st, sunday or the last complete day, spend, leads)
     weeks: list = field(default_factory=list)
+    # The sheet's budget is with VAT: its amounts are shown with VAT too.
+    vat_included: bool = False
 
     @property
     def first_day(self):
@@ -209,6 +211,7 @@ def plan_fact(
         scale_with_budget=plan.leads_scale_with_budget,
         unseen=[] if lead_goals else unseen_sources(plan.lead_definition),
         breakdown=breakdown or {},
+        vat_included=plan.budget_vat == "with",
     )
 
 
@@ -229,7 +232,9 @@ def plan_fact_text(result):
         lines += [
             "",
             "**💰 Расход** · без НДС, как в отчётах Директа",
-            f"{money(result.spend)} из {money(result.budget)} — **{share(result.spend, result.budget)}**"
+            f"{money(result.spend)} из {money(result.budget)}"
+            + (f" ({money(result.budget * VAT)} с НДС)" if result.vat_included else "")
+            + f" — **{share(result.spend, result.budget)}**"
             f" (по дням прошло {number_text(expected, 0)}%)",
             f"Прогноз: **{money(result.spend_forecast)} — "
             f"{share(result.spend_forecast, result.budget)}** плана",
@@ -271,7 +276,9 @@ def plan_fact_text(result):
         lines += [
             "",
             "**💵 Цена лида**",
-            f"**{money(cpl)}** · план {money(planned)} "
+            f"**{money(cpl)}** · план {money(planned)}"
+            + (f" без НДС ({money(planned * VAT)} с НДС)" if result.vat_included else "")
+            + " "
             f"({sign}{number_text(abs(percent(cpl - planned, planned)), 0)}%)",
         ]
     step = result.reward_step
@@ -450,6 +457,33 @@ class MediaPlans:
                 )
             leads = sum(reaches.values(), Decimal(0)) if reaches is not None else None
         return spend, leads, reaches
+
+    async def lead_source(self, client, period):
+        """Agreed leads for both halves of a report period, or None when the client
+        has no lead goals or Metrica did not answer: the card then keeps Direct's."""
+        record = await self.repository.media_plan(client.id) or {}
+        goals = record.get("lead_goal_ids")
+        if not goals:
+            return None
+        attribution = record.get("lead_attribution") or "lastsign"
+        count_leads = self.direct_leads if attribution == "LYDC" else self.metrica_leads
+        try:
+            current = await count_leads(client, period.current, goals)
+            previous = await count_leads(client, period.previous, goals)
+        except Exception as exc:
+            logger.warning("Report leads failed client=%s (%s)", client.id, type(exc).__name__)
+            return None
+        if current is None:
+            return None
+        label = (
+            f"по {len(goals)} {plural(len(goals), 'цели', 'целям', 'целям')} для лидов "
+            f"в визитах из Директа ({ATTRIBUTIONS.get(attribution, attribution)})"
+        )
+        return (
+            sum(current.values(), Decimal(0)),
+            sum(previous.values(), Decimal(0)) if previous is not None else None,
+            label,
+        )
 
     async def goal_names(self, client):
         return {
