@@ -209,7 +209,8 @@ def plan_fact_text(result):
                 f"План увеличен с {count(result.leads_plan)}: прогноз расхода выше бюджета, "
                 "а по условиям медиаплана лиды растут пропорционально."
             )
-    if result.budget and result.leads_plan and result.leads:
+    # The price of undercounted leads is inflated just as much: no comparison then.
+    if result.budget and result.leads_plan and result.leads and not result.unseen:
         cpl, planned = result.spend / result.leads, result.budget / result.leads_plan
         sign = "+" if cpl >= planned else "−"
         lines += [

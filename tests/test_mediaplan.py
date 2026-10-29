@@ -159,6 +159,7 @@ def test_leads_the_bot_cannot_see_are_flagged_and_reward_is_not_guessed():
     text = plan_fact_text(result)
     assert "входят звонки Calltouch — бот их не видит" in text
     assert "**🎯 Лиды** ⚪" in text and "Вознаграждение" not in text
+    assert "Цена лида" not in text
     assert plan_fact_line(result).endswith("лиды: часть не видна боту (звонки Calltouch)")
     # A scale read only from 90% up: 7% is below it, the bot does not pick a step.
     payload = {
