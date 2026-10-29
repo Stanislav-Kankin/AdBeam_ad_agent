@@ -196,6 +196,10 @@ class MediaPlanRecord(Base):
     # Metrica goals counted as leads for this plan, agreed per client (e.g. phone
     # clicks + orders + favourites); None — the bot's main goals in Direct.
     lead_goal_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Set by a manager over what the model read: "with"/"without" VAT in the budget.
+    budget_vat: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # "lastsign" — Metrica, last significant click; "LYDC" — Direct, last Direct click.
+    lead_attribution: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # "Do not ask again": reports run without the media plan question.
     dismissed: Mapped[bool] = mapped_column(Boolean, default=False)
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

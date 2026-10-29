@@ -17,6 +17,11 @@ from app.reporting.formatter import number_text, plural
 
 logger = logging.getLogger(__name__)
 
+# How lead goals are attributed to Direct; Metrica's default report model first.
+ATTRIBUTIONS = {
+    "lastsign": "последний значимый переход, Метрика",
+    "LYDC": "последний переход из Директа, Директ",
+}
 # Visits whose last significant source is a Yandex Direct ad.
 DIRECT_VISITS = "ym:s:lastsignAdvEngine=='ya_direct'"
 # Russian VAT since 2026; Direct reports spend without it.
@@ -88,6 +93,18 @@ class PlanFact:
     scale_with_budget: bool = False
     # Sources the plan counts as leads that the bot cannot see (Calltouch, CRM).
     unseen: list[str] = field(default_factory=list)
+    # Goal name → reaches, so a manager can check the leads against Metrica.
+    breakdown: dict[str, Decimal] = field(default_factory=dict)
+    # (monday or the 1st, sunday or the last complete day, spend, leads)
+    weeks: list = field(default_factory=list)
+
+    @property
+    def first_day(self):
+        return f"01.{self.month[5:]}"
+
+    @property
+    def last_day(self):
+        return f"{self.elapsed:02d}.{self.month[5:]}"
 
     @property
     def spend_forecast(self):
@@ -134,7 +151,17 @@ class PlanFact:
         return "🟢" if value >= 95 else "🟡" if value >= 80 else "🔴"
 
 
-def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=(), lead_goals=None):
+def plan_fact(
+    plan,
+    *,
+    spend,
+    leads,
+    today=None,
+    main_goal_ids=(),
+    lead_goals=None,
+    attribution="lastsign",
+    breakdown=None,
+):
     """Month to date through yesterday; on the 1st that is the whole previous month.
     ``lead_goals``: Metrica goals agreed as leads for this client; leads then come from
     them and the plan's own lead definition no longer warns about unseen sources."""
@@ -148,11 +175,16 @@ def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=(), lead_goals=No
     if budget is not None and plan.budget_vat == "with":
         budget = budget / VAT
         notes.append("Бюджет плана указан с НДС: для сравнения с Директом пересчитан без НДС 22%.")
+    elif budget is not None and plan.budget_vat == "unknown":
+        notes.append(
+            "В медиаплане не указано, с НДС ли бюджет: сравниваю как будто без НДС. Если "
+            "бюджет с НДС, переключите это в меню медиаплана."
+        )
     if lead_goals:
         notes.append(
             f"Лиды — достижения {len(lead_goals)} "
-            f"{plural(len(lead_goals), 'цели', 'целей', 'целей')} Метрики в визитах из "
-            "Директа (последний значимый переход), как настроено для этого клиента."
+            f"{plural(len(lead_goals), 'цели', 'целей', 'целей')} в визитах из Директа "
+            f"({ATTRIBUTIONS.get(attribution, attribution)}), как настроено для клиента."
         )
     else:
         missing = [goal for goal in plan.goal_ids if goal not in set(main_goal_ids)]
@@ -176,6 +208,7 @@ def plan_fact(plan, *, spend, leads, today=None, main_goal_ids=(), lead_goals=No
         rewards=month.rewards,
         scale_with_budget=plan.leads_scale_with_budget,
         unseen=[] if lead_goals else unseen_sources(plan.lead_definition),
+        breakdown=breakdown or {},
     )
 
 
@@ -188,13 +221,14 @@ def plan_fact_text(result):
     """Blocks with bold headings: a manager scans spend, leads, price and reward."""
     lines = [
         f"📅 **Медиаплан · {month_name(result.month)}**",
-        f"Прошло {result.elapsed} из {result.days} дн. Прогноз — текущий темп до конца месяца.",
+        f"Факт за {result.first_day}–{result.last_day} ({result.elapsed} из {result.days} дн.). "
+        "Прогноз — текущий темп до конца месяца.",
     ]
     expected = Decimal(result.elapsed) / result.days * 100
     if result.budget and result.spend is not None:
         lines += [
             "",
-            "**💰 Расход**",
+            "**💰 Расход** · без НДС, как в отчётах Директа",
             f"{money(result.spend)} из {money(result.budget)} — **{share(result.spend, result.budget)}**"
             f" (по дням прошло {number_text(expected, 0)}%)",
             f"Прогноз: **{money(result.spend_forecast)} — "
@@ -209,6 +243,16 @@ def plan_fact_text(result):
             f"Прогноз: **{count(result.leads_forecast)} — "
             f"{share(result.leads_forecast, result.leads_target)}** плана",
         ]
+        if result.breakdown:
+            ranked = sorted(result.breakdown.items(), key=lambda item: -item[1])
+            parts = [f"{name} {count(value)}" for name, value in ranked[:2]]
+            rest = ranked[2:]
+            if rest:
+                parts.append(
+                    f"ещё {len(rest)} {plural(len(rest), 'цель', 'цели', 'целей')} "
+                    f"{count(sum(value for _, value in rest))}"
+                )
+            lines.append("По целям: " + " · ".join(parts))
         if result.unseen:
             lines.append(
                 f"⚠️ В лиды медиаплана входят {' и '.join(result.unseen)} — бот их не видит "
@@ -244,6 +288,34 @@ def plan_fact_text(result):
             "**🏆 Вознаграждение по шкале KPI**",
             reward + (f" · при 100% — {money(top)}" if top and step[0] != "100" else ""),
         ]
+    if result.weeks:
+        lines += ["", "**📆 По неделям (пн–вс)** · % — от плана на эти дни"]
+        for start, end, spend, leads in result.weeks:
+            days = (end - start).days + 1
+            parts = [f"{start:%d.%m}–{end:%d.%m}"]
+            if spend is not None:
+                parts.append(
+                    f"расход {money(spend)}"
+                    + (
+                        f" ({share(spend, result.budget * days / result.days)})"
+                        if result.budget
+                        else ""
+                    )
+                )
+            if leads is not None and not result.unseen:
+                parts.append(
+                    f"лиды {count(leads)}"
+                    + (
+                        f" ({share(leads, result.leads_plan * days / result.days)})"
+                        if result.leads_plan
+                        else ""
+                    )
+                )
+                if spend and leads:
+                    parts.append(f"лид {money(spend / leads)}")
+            if days < 7:
+                parts.append(f"{days} дн.")
+            lines.append(" · ".join(parts))
     conditions = []
     if result.spend is None:
         conditions.append("Факт Директа за месяц сейчас недоступен: сравнение неполное.")
@@ -322,33 +394,99 @@ class MediaPlans:
         if plan.month(f"{yesterday:%Y-%m}") is None:
             return None
         month = DateRange(start=yesterday.replace(day=1), end=yesterday)
-        snapshot = await self.checks.snapshot(client, month, quick=False)
-        spend = leads = None
-        if snapshot.direct.status == DataStatus.OK:
-            metrics = snapshot_metrics(snapshot)
-            spend, leads = metrics.spend, metrics.conversions
-        lead_goals = (await self.repository.media_plan(client.id) or {}).get("lead_goal_ids")
-        if lead_goals:
-            try:
-                leads = await self.metrica_leads(client, month, lead_goals)
-            except Exception as exc:
-                logger.warning(
-                    "Media plan leads failed client=%s (%s)", client.id, type(exc).__name__
-                )
-                leads = None
-        return plan_fact(
+        record = await self.repository.media_plan(client.id) or {}
+        if record.get("budget_vat"):
+            plan = plan.model_copy(update={"budget_vat": record["budget_vat"]})
+        lead_goals = record.get("lead_goal_ids")
+        attribution = record.get("lead_attribution") or "lastsign"
+        spend, leads, reaches = await self.fact(client, month, lead_goals, attribution)
+        breakdown = None
+        if reaches:
+            names = await self.goal_names(client)
+            breakdown = {}
+            for goal, value in reaches.items():
+                name = names.get(goal, f"цель {goal}")
+                breakdown[name] = breakdown.get(name, Decimal(0)) + value
+        result = plan_fact(
             plan,
             spend=spend,
             leads=leads,
             today=today,
             main_goal_ids=client.direct.main_goal_ids,
             lead_goals=lead_goals,
+            attribution=attribution,
+            breakdown=breakdown,
         )
+        # Specialists read a month by Monday–Sunday weeks; the edge weeks are cut
+        # to the month and to the last complete day.
+        start = month.start
+        while start <= month.end:
+            end = min(start + timedelta(days=6 - start.weekday()), month.end)
+            week_spend, week_leads, _ = await self.fact(
+                client, DateRange(start=start, end=end), lead_goals, attribution
+            )
+            result.weeks.append((start, end, week_spend, week_leads))
+            start = end + timedelta(days=1)
+        return result
+
+    async def fact(self, client, period, lead_goals, attribution):
+        """(spend, leads, goal → reaches) of a period; leads come from the agreed
+        goals when the client has them, else from Direct's main goal conversions."""
+        snapshot = await self.checks.snapshot(client, period, quick=False)
+        spend = leads = reaches = None
+        if snapshot.direct.status == DataStatus.OK:
+            metrics = snapshot_metrics(snapshot)
+            spend, leads = metrics.spend, metrics.conversions
+        if lead_goals:
+            try:
+                reaches = await (
+                    self.direct_leads(client, period, lead_goals)
+                    if attribution == "LYDC"
+                    else self.metrica_leads(client, period, lead_goals)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Media plan leads failed client=%s (%s)", client.id, type(exc).__name__
+                )
+            leads = sum(reaches.values(), Decimal(0)) if reaches is not None else None
+        return spend, leads, reaches
+
+    async def goal_names(self, client):
+        return {
+            str(goal["id"]): str(goal.get("name") or goal["id"]).removeprefix("Конверсия | ")
+            for counter in await self.repository.client_counters(client.id)
+            for goal in counter["goals"] or []
+        }
+
+    async def direct_leads(self, client, period, goal_ids):
+        """Goal conversions by Direct's "last Yandex Direct click": the model of
+        Metrica's Direct reports specialists read. Ten goals per Direct report."""
+        model = client.model_copy(
+            update={"direct": client.direct.model_copy(update={"attribution_model": "LYDC"})}
+        )
+        reaches = {goal: Decimal(0) for goal in goal_ids}
+        for start in range(0, len(goal_ids), 10):
+            data = await self.checks.provider.direct_query(
+                model,
+                period.start,
+                period.end,
+                report_type="CUSTOM_REPORT",
+                fields=["Conversions"],
+                filters=None,
+                goals=goal_ids[start : start + 10],
+                order_by=None,
+                limit=10,
+            )
+            for row in data["rows"]:
+                for column, value in row.items():
+                    goal = column.split("_")[1] if column.startswith("Conversions_") else None
+                    if goal in reaches and value not in (None, "", "--"):
+                        reaches[goal] += Decimal(str(value))
+        return reaches
 
     async def metrica_leads(self, client, period, goal_ids):
-        """Reaches of the lead goals in visits from Direct. Metrica, not Direct: a plan
-        may count more than the ten goals a Direct report takes, and agencies read
-        leads in Metrica."""
+        """Goal → reaches in visits whose last significant source is Direct; None
+        without a Metrica counter."""
         counters = client.metrica.selected_counter_ids()
         if not counters:
             return None
@@ -362,7 +500,7 @@ class MediaPlans:
         by_counter = {}
         for goal in goal_ids:
             by_counter.setdefault(owner.get(goal, counters[0]), []).append(goal)
-        total = Decimal(0)
+        reaches = {}
         for counter, goals in by_counter.items():
             # The Reporting API takes at most 20 metrics per query.
             for start in range(0, len(goals), 20):
@@ -377,8 +515,10 @@ class MediaPlans:
                     sort=None,
                     limit=1,
                 )
-                total += sum(Decimal(str(value or 0)) for value in data["totals"].values())
-        return total
+                for metric, value in data["totals"].items():
+                    goal = metric.removeprefix("ym:s:goal").removesuffix("reaches")
+                    reaches[goal] = Decimal(str(value or 0))
+        return reaches
 
     async def digest_lines(self, clients):
         """Client id → media plan pace line for the weekly digest."""

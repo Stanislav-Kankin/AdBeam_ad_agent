@@ -10,7 +10,12 @@ from aiogram import F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.analytics.mediaplan import month_name, plan_fact_text, plan_preview
+from app.analytics.mediaplan import (
+    ATTRIBUTIONS,
+    month_name,
+    plan_fact_text,
+    plan_preview,
+)
 from app.analytics.periods import MOSCOW, today_moscow
 from app.analytics.rules import main_kpi
 from app.bot.callbacks import answer_callback
@@ -34,6 +39,7 @@ PERIODS = (
 )
 
 
+VAT_NAMES = {"with": "с НДС", "without": "без НДС", "unknown": "не указан"}
 KPI_NAMES = {"cpa": "CPA", "drr": "ДРР", "conversions": "Конверсии"}
 TOLERANCES = (3, 5, 10)
 TARGET_FIELDS = {"target_cpa": "целевой CPA, ₽", "target_drr": "целевой ДРР, %"}
@@ -731,6 +737,8 @@ def install_menu(router, runtime, launch, launch_chart):
             text = badge + f"📅 **Медиаплан · {client.name}**\n"
             if record.get("plan"):
                 plan = MediaPlan.model_validate(record["plan"])
+                if record.get("budget_vat"):
+                    plan = plan.model_copy(update={"budget_vat": record["budget_vat"]})
                 current = f"{today_moscow():%Y-%m}"
                 upcoming = [m for m in plan.months if m.month >= current][:2] or plan.months[-2:]
                 text += (
@@ -741,8 +749,9 @@ def install_menu(router, runtime, launch, launch_chart):
                     + plan_preview(plan.model_copy(update={"months": upcoming}))
                 )
                 lead_goals = record.get("lead_goal_ids") or []
+                attribution = record.get("lead_attribution") or "lastsign"
                 text += "\n\n**Как считаются лиды**\n" + (
-                    f"Цели Метрики ({len(lead_goals)}) в визитах из Директа — настроено вручную."
+                    f"Цели ({len(lead_goals)}) в визитах из Директа — {ATTRIBUTIONS[attribution]}."
                     if lead_goals
                     else "Конверсии Директа по основным целям бота. Если агентство считает "
                     "лиды иначе (звонки, заказы, свой набор целей), настройте «Цели для лидов»."
@@ -750,6 +759,20 @@ def install_menu(router, runtime, launch, launch_chart):
                 row("📊 План/факт за месяц", "mediaplan_progress", client_id=client_id)
                 if can_configure(user):
                     row("🎯 Цели для лидов", "lead_goals", client_id=client_id)
+                    row(
+                        f"💰 НДС в бюджете плана: {VAT_NAMES[plan.budget_vat]}",
+                        "toggle_plan_vat",
+                        client_id=client_id,
+                    )
+                    if lead_goals:
+                        row(
+                            "⚖️ Атрибуция: "
+                            + {"lastsign": "последний значимый", "LYDC": "переход из Директа"}[
+                                attribution
+                            ],
+                            "toggle_lead_attribution",
+                            client_id=client_id,
+                        )
             else:
                 text += (
                     "\nМедиаплан не загружен. С ним отчёт по клиенту покажет выполнение плана "
@@ -935,6 +958,8 @@ def install_menu(router, runtime, launch, launch_chart):
                 "lead_goals",
                 "set_lead_goals",
                 "enter_lead_goals",
+                "toggle_plan_vat",
+                "toggle_lead_attribution",
                 "enter_mediaplan",
                 "mediaplan_save",
                 "mediaplan_refresh",
@@ -1095,6 +1120,19 @@ def install_menu(router, runtime, launch, launch_chart):
             field = "kpi" if action == "set_kpi" else "kpi_change_tolerance_percent"
             await save_targets(client, {field: kwargs["value"]}, user)
             await show(callback.message, user, screen="kpi", edit=True, client_id=client.id)
+        elif action in ("toggle_plan_vat", "toggle_lead_attribution"):
+            record = await runtime.checks.repository.media_plan(client_id) or {}
+            if action == "toggle_plan_vat":
+                current = record.get("budget_vat") or (record.get("plan") or {}).get(
+                    "budget_vat", "unknown"
+                )
+                order = ["unknown", "with", "without"]
+                update = {"budget_vat": order[(order.index(current) + 1) % len(order)]}
+            else:
+                current = record.get("lead_attribution") or "lastsign"
+                update = {"lead_attribution": "LYDC" if current == "lastsign" else "lastsign"}
+            await runtime.checks.repository.update_media_plan(client_id, actor=user, **update)
+            await show(callback.message, user, screen="mediaplan", edit=True, client_id=client_id)
         elif action == "set_lead_goals":
             goals = None
             if kwargs["source"] == "plan":

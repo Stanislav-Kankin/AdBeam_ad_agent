@@ -108,6 +108,8 @@ class Repository:
             "plan": row.plan,
             "source_hash": row.source_hash,
             "lead_goal_ids": row.lead_goal_ids,
+            "budget_vat": row.budget_vat,
+            "lead_attribution": row.lead_attribution,
             "error": row.error,
             "dismissed": row.dismissed,
             "checked_at": row.checked_at,

@@ -132,7 +132,8 @@ def test_plan_fact_forecasts_month_and_reward_step():
     assert result.leads_target == Decimal("5257")
     assert result.reward_step == ("90", Decimal("136218"), False)
     text = plan_fact_text(result)
-    assert "**Медиаплан · октябрь 2026**" in text and "Прошло 28 из 31" in text
+    assert "**Медиаплан · октябрь 2026**" in text and "Факт за 01.10–28.10 (28 из 31 дн.)" in text
+    assert "**💰 Расход** · без НДС" in text
     assert "**💰 Расход**" in text and "**🎯 Лиды** 🟡" in text
     assert "ступень «до 90%»: **136,2 тыс. ₽** · при 100% — 181,6 тыс. ₽" in text
     assert "Не выбраны в боте основными 1 из 2 целей" in text
@@ -290,13 +291,22 @@ async def test_agreed_lead_goals_are_counted_in_metrica_direct_visits(runtime, c
 
     runtime.checks.provider.metrica_query = metrica_query
     result = await runtime.mediaplans.progress(client)
-    # 23 goals: two queries (20 + 3 metrics), only visits from Direct.
-    assert [len(q["metrics"]) for q in queries] == [20, 3]
+    # 23 goals: two queries (20 + 3 metrics) for the month and for every week,
+    # only visits from Direct.
+    assert [len(q["metrics"]) for q in queries] == [20, 3] * (1 + len(result.weeks))
     assert all(q["filters"] == "ym:s:lastsignAdvEngine=='ya_direct'" for q in queries)
     assert result.leads == 230 and result.unseen == []
+    # Monday–Sunday weeks cover the month to date without gaps.
+    first, last = result.weeks[0], result.weeks[-1]
+    assert first[0].day == 1 and last[1] == today_moscow() - timedelta(days=1)
+    assert all(end.weekday() == 6 for _, end, _, _ in result.weeks[:-1])
+    assert all(week[3] == 230 for week in result.weeks)
     text = plan_fact_text(result)
     assert "бот их не видит" not in text and "Цена лида" in text
-    assert "Лиды — достижения 23 целей Метрики в визитах из Директа" in text
+    assert "Лиды — достижения 23 целей в визитах из Директа (последний значимый" in text
+    assert "По целям: цель 100000 10 · цель 100001 10 · ещё 21 цель 210" in text
+    assert "**📆 По неделям (пн–вс)**" in text
+    assert f"{first[0]:%d.%m}–{first[1]:%d.%m} · расход" in text
 
 
 async def test_lead_goals_are_set_up_in_the_menu(runtime, client):
