@@ -146,24 +146,25 @@ def install_menu(router, runtime, launch, launch_chart):
         uid = int(value)
         if uid in runtime.settings.telegram_admin_user_ids:
             await message.answer("Это администратор из .env. Его права уже настроены.")
-        else:
-            ids = [c.id for c in runtime.registry.visible(message.chat.id)]
-            await runtime.checks.repository.set_bot_user(uid, True, ids, message.from_user.id)
-            try:
-                # Works once the person has opened the bot; otherwise the name is
-                # filled in on their first message.
-                chat = await message.bot.get_chat(uid)
-                await runtime.checks.repository.remember_user_name(
-                    uid, chat.username, chat.full_name
-                )
-            except Exception:
-                pass
-            await message.answer(
-                f"Пользователь {uid} добавлен. Доступных клиентов: {len(ids)}. "
-                "Теперь он может открыть личный чат с ботом и отправить /start. "
-                "Ему доступны отчёты и настройка целей, счётчиков и KPI своих клиентов."
-            )
-        await show(message, message.from_user.id, screen="users")
+            await show(message, message.from_user.id, screen="users")
+            return
+        members = await runtime.checks.repository.bot_users()
+        # A new person starts with no clients: the administrator picks the ones they lead.
+        ids = (members.get(uid) or {}).get("client_ids") or []
+        await runtime.checks.repository.set_bot_user(uid, True, ids, message.from_user.id)
+        try:
+            # Works once the person has opened the bot; otherwise the name is
+            # filled in on their first message.
+            chat = await message.bot.get_chat(uid)
+            await runtime.checks.repository.remember_user_name(uid, chat.username, chat.full_name)
+        except Exception:
+            pass
+        await message.answer(
+            f"Пользователь {uid} добавлен. Назначено клиентов: {len(ids)}. "
+            "Отметьте ниже клиентов, которых он ведёт: только они будут видны ему в "
+            "личном чате с ботом и в сводке по понедельникам."
+        )
+        await show(message, message.from_user.id, screen="member_clients", client_id=uid)
 
     async def clear(chat, user):
         """/cancel: drop every menu this user opened in the chat."""
@@ -703,7 +704,7 @@ def install_menu(router, runtime, launch, launch_chart):
             awaiting_user[(chat, user)] = monotonic()
             await callback.message.answer(
                 "Пришлите числовой Telegram ID пользователя. "
-                "Он получит доступ в личном чате ко всем клиентам, видимым вам здесь. /cancel — отмена."
+                "Клиентов для него вы отметите на следующем шаге. /cancel — отмена."
             )
         elif action == "member_clients":
             await show(
@@ -735,13 +736,10 @@ def install_menu(router, runtime, launch, launch_chart):
             if uid in runtime.settings.telegram_admin_user_ids:
                 await callback.message.answer("Администраторы управляются через .env.")
                 return
+            # Assigned clients survive a revoke, so restoring access does not widen it.
+            member = (await runtime.checks.repository.bot_users()).get(uid) or {}
             await runtime.checks.repository.set_bot_user(
-                uid,
-                action == "member_restore",
-                [c.id for c in runtime.registry.visible(chat)]
-                if action == "member_restore"
-                else [],
-                user,
+                uid, action == "member_restore", member.get("client_ids") or [], user
             )
             await show(
                 callback.message, user, screen="users", page=kwargs.get("page", 0), edit=True

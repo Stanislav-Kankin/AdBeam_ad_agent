@@ -93,9 +93,18 @@ async def test_user_menu_add_and_status_ui(runtime):
         await click("Пользователи")
         await click("Добавить по")
         await dp.feed_update(bot, message_update("42"))
-        assert (await runtime.checks.repository.bot_users())[42]["enabled"]
+        member = (await runtime.checks.repository.bot_users())[42]
+        assert member["enabled"] and member["client_ids"] == []
+        # The administrator lands on the client picker and chooses who this person leads.
+        assert "Отмечено: 0 из" in session.sent[-1].text
+        await click("West")
+        assert (await runtime.checks.repository.bot_users())[42]["client_ids"] == ["west_export"]
+        await click("← Пользователи")
         await click("Удалить 42")
         assert not (await runtime.checks.repository.bot_users())[42]["enabled"]
+        await click("Добавить снова 42")
+        member = (await runtime.checks.repository.bot_users())[42]
+        assert member["enabled"] and member["client_ids"] == ["west_export"]
         await click("Главное меню")
         await click("Клиенты")
         await click("West")
