@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 class DailySchedule:
-    def __init__(self, settings, checks, send, agent=None):
+    def __init__(self, settings, checks, send, agent=None, mediaplans=None):
         self.settings, self.checks, self.send, self.agent = settings, checks, send, agent
+        self.mediaplans = mediaplans
         self.scheduler = AsyncIOScheduler(timezone=MOSCOW)
         self.lock = asyncio.Lock()
 
@@ -31,6 +32,17 @@ class DailySchedule:
             max_instances=1,
             coalesce=True,
         )
+        if self.mediaplans:
+            # Managers edit media plans in place; re-read them once a day.
+            self.scheduler.add_job(
+                self.mediaplans.refresh_all,
+                "interval",
+                hours=24,
+                id="mediaplan_refresh",
+                next_run_time=datetime.now(MOSCOW) + timedelta(minutes=10),
+                max_instances=1,
+                coalesce=True,
+            )
         self.scheduler.add_job(
             self.backup,
             "interval",
@@ -196,9 +208,16 @@ class DailySchedule:
         )
         failed = [cid for cid in ids if cid not in {report.client_id for report in reports}]
         week = str(period.current.start)
+        plans = (
+            await self.mediaplans.digest_lines(
+                [self.checks.registry.clients[r.client_id] for r in reports]
+            )
+            if self.mediaplans
+            else {}
+        )
 
         async def team():
-            return weekly_digest(reports, period, failed)
+            return weekly_digest(reports, period, failed, plans=plans)
 
         await self.deliver(f"{self.settings.app_mode}:{chat}:week:{week}", chat, team)
         # Each manager gets their own clients in a private chat.
@@ -209,7 +228,7 @@ class DailySchedule:
                 continue
 
             async def personal(mine=mine):
-                return weekly_digest(mine, period, title="Ваши клиенты за неделю")
+                return weekly_digest(mine, period, title="Ваши клиенты за неделю", plans=plans)
 
             try:
                 await self.deliver(f"{self.settings.app_mode}:{uid}:week:{week}", uid, personal)

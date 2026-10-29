@@ -4,6 +4,7 @@ import httpx
 
 from app.agent.service import AgentService
 from app.analytics.diagnostics import CheckService
+from app.analytics.mediaplan import MediaPlans
 from app.bot.jobs import BackgroundJobs
 from app.config import load_clients
 from app.integrations.claude import ClaudeProvider
@@ -12,6 +13,7 @@ from app.integrations.direct import DirectAdapter
 from app.integrations.discovery import AccountDiscovery
 from app.integrations.http import ReadTransport
 from app.integrations.inventory import MetricaInventory
+from app.integrations.mediaplan import MediaPlanReader
 from app.integrations.metrica import MetricaAdapter
 from app.integrations.mock import MockProvider
 from app.integrations.offline_llm import OfflineDemoProvider
@@ -34,6 +36,7 @@ class Runtime:
     schedule: object = None
     discovery: object = None
     inventory: object = None
+    mediaplans: MediaPlans | None = None
 
     async def close(self):
         if self.schedule:
@@ -83,6 +86,7 @@ def build_runtime(settings):
         engine,
         http,
     )
+    runtime.mediaplans = MediaPlans(MediaPlanReader(http, llm), checks)
     if settings.app_mode == "production" and settings.yandex_discover_clients:
         runtime.discovery = AccountDiscovery(transport, registry, settings, repo)
         runtime.inventory = MetricaInventory(transport, repo, registry)

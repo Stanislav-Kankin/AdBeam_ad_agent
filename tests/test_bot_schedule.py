@@ -354,6 +354,8 @@ async def test_menu_report_flow_and_replay(runtime, all_clients, ack_failure):
     session = CallbackTimeoutTelegram()
     spy = AsyncMock(wraps=runtime.checks.run_check)
     runtime.checks.run_check = spy
+    # The media plan question has its own test; here the button replay is checked.
+    await runtime.checks.repository.update_media_plan("west_export", dismissed=True)
     async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
         dp = build_dispatcher(runtime)
 

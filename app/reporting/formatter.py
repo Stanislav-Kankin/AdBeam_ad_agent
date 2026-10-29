@@ -335,6 +335,31 @@ def quality_lines(report):
     return lines
 
 
+# What a gap in a source means for the numbers above, in a manager's words.
+SOURCE_GAPS = {
+    "Директ": {
+        "insufficient": "Директ отдал данные не полностью: расход и конверсии могут быть занижены.",
+        "unavailable": "Директ не ответил: цифры рекламы неполные, повторите проверку позже.",
+        "no_data": "В Директе нет статистики за период.",
+    },
+    "Метрика": {
+        "insufficient": "Метрика отдала данные не полностью: показатели сайта могут быть неточными.",
+        "unavailable": "Метрика не ответила: показатели сайта в отчёт не вошли.",
+        "no_data": "В Метрике нет данных за период: показатели сайта не учтены.",
+    },
+}
+
+
+def data_line(report):
+    """One calm line when both sources answered; otherwise what is missing and why it matters."""
+    gaps = [
+        SOURCE_GAPS[source][status]
+        for source, status in report.source_status.items()
+        if source in SOURCE_GAPS and status in SOURCE_GAPS[source]
+    ]
+    return " ".join(gaps) if gaps else "Данные Директа и Метрики получены."
+
+
 def card(report: ClientReport, summary: str | None = None) -> str:
     """Main single-client answer: status, KPI, key deltas, concrete risks, data line."""
     kpi = main_metric(report)
@@ -396,12 +421,7 @@ def card(report: ClientReport, summary: str | None = None) -> str:
     if context:
         lines.append("Контекст: " + " ".join(dict.fromkeys(context[:3])))
 
-    sources = ", ".join(
-        f"{source} — {STATUS_NAMES.get(status, status)}"
-        for source, status in report.source_status.items()
-        if source in ("Директ", "Метрика")
-    )
-    footer = f"Данные: {sources}."
+    footer = data_line(report)
     if report.targets.get("excluded_campaigns"):
         words = ", ".join(f"«{w}»" for w in report.targets["excluded_campaigns"])
         footer += f" Кампании со словами {words} в рисках не подсвечиваются."
@@ -466,9 +486,10 @@ def has_signal(report, type_):
     return any(signal.type == type_ for signal in report.signals)
 
 
-def weekly_digest(reports, period, errors=(), *, title="Сводка за неделю"):
+def weekly_digest(reports, period, errors=(), *, title="Сводка за неделю", plans=None):
     """Portfolio of a manager for the last complete week: one line per client with the
-    result, its price and spend, worst first, and the main risk under it."""
+    result, its price and spend, worst first, the main risk and the media plan pace
+    (``plans``: client id → line) under it."""
     order = {"red": 0, "yellow": 1, "unknown": 2, "green": 3}
 
     def short(key, report):
@@ -518,6 +539,8 @@ def weekly_digest(reports, period, errors=(), *, title="Сводка за нед
         )
         if risk and report.level in ("red", "yellow"):
             lines.append(f"   ↳ {risk}")
+        if (plans or {}).get(report.client_id):
+            lines.append(f"   📅 {plans[report.client_id]}")
     if idle:
         lines += ["", "Без расхода за неделю: " + ", ".join(r.client_name for r in idle) + "."]
     if errors:

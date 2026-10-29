@@ -13,6 +13,7 @@ from aiogram.types import (
     InputMediaPhoto,
 )
 
+from app.analytics.mediaplan import plan_fact_text
 from app.analytics.periods import AnalysisPeriod, make_period
 from app.analytics.progress import progress_state
 from app.analytics.trend import load_trend, summary
@@ -316,6 +317,21 @@ def build_dispatcher(runtime):
         )
         return True
 
+    async def send_plan_fact(message, client):
+        """Media plan pace under a single-client report; a report never fails on it."""
+        try:
+            result = await runtime.mediaplans.progress(client)
+            if result:
+                await send_text(
+                    message.bot,
+                    message.chat.id,
+                    plan_fact_text(result),
+                    markdown=True,
+                    thread_id=topic_of(message),
+                )
+        except Exception:
+            logger.exception("Media plan pace failed client=%s", client.id)
+
     async def launch(message, user_id, client_ids, period, mode):
         presentation = ReportMessage(message)
 
@@ -352,6 +368,8 @@ def build_dispatcher(runtime):
                 )
                 state["stage"] = "отправляю результат"
                 await presentation.finish(text, markdown=markdown)
+                if len(client_ids) == 1:
+                    await send_plan_fact(message, client)
                 await offer_details(message, reports, user_id)
                 if chart_task:
                     try:
@@ -537,8 +555,12 @@ def build_dispatcher(runtime):
                         and message.from_user.id not in runtime.settings.telegram_admin_user_ids
                         else "Сводка за неделю"
                     )
+                    plans = await runtime.mediaplans.digest_lines(
+                        [runtime.registry.require(message.chat.id, r.client_id) for r in reports]
+                    )
                     await presentation.finish(
-                        weekly_digest(reports, period, failed, title=title), markdown=True
+                        weekly_digest(reports, period, failed, title=title, plans=plans),
+                        markdown=True,
                     )
                 finally:
                     await presentation.stop()

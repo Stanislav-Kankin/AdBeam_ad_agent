@@ -17,6 +17,7 @@ from app.storage.models import (
     Delivery,
     DirectDimensionPage,
     LlmUsage,
+    MediaPlanRecord,
     MenuAction,
     MetricaCounterCatalog,
     Run,
@@ -90,6 +91,53 @@ class Repository:
                 session.add(row)
             row.enabled, row.client_ids = enabled, list(client_ids)
             row.updated_by, row.updated_at = str(actor), datetime.now(UTC)
+
+    @staticmethod
+    def media_plan_row(row):
+        return {
+            "client_id": row.client_id,
+            "url": row.url,
+            "plan": row.plan,
+            "source_hash": row.source_hash,
+            "error": row.error,
+            "dismissed": row.dismissed,
+            "checked_at": row.checked_at,
+            "updated_by": row.updated_by,
+            "updated_at": row.updated_at,
+        }
+
+    async def media_plan(self, client_id):
+        async with self.sessions() as session:
+            row = await session.get(MediaPlanRecord, (self.app_mode, client_id))
+        return self.media_plan_row(row) if row else None
+
+    async def media_plans(self):
+        async with self.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(MediaPlanRecord).where(
+                        MediaPlanRecord.app_mode == self.app_mode,
+                        MediaPlanRecord.url.is_not(None),
+                    )
+                )
+            ).all()
+        return [self.media_plan_row(row) for row in rows]
+
+    async def update_media_plan(self, client_id, actor=None, **fields):
+        """Change only the given fields: url, plan, source_hash, error, dismissed, checked_at."""
+        async with self.write_session() as session:
+            row = await session.get(MediaPlanRecord, (self.app_mode, client_id))
+            if row is None:
+                row = MediaPlanRecord(app_mode=self.app_mode, client_id=client_id, dismissed=False)
+                session.add(row)
+            for key, value in fields.items():
+                # Not safe_json: its phone masking would eat an eleven-digit goal ID.
+                if key == "plan" and value is not None:
+                    value = json.loads(json.dumps(value, ensure_ascii=False, default=str))
+                setattr(row, key, value)
+            if actor is not None:
+                row.updated_by = str(actor)
+            row.updated_at = datetime.now(UTC)
 
     async def reserve_model_call(self, chat_id, user_id, request_id, limit):
         # One bot process per database. Reservation is persisted before the API call.

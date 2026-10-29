@@ -179,3 +179,20 @@ class ConversationState(Base):
     active_client_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     period: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class MediaPlanRecord(Base):
+    __tablename__ = "media_plans"
+    app_mode: Mapped[str] = mapped_column(String(20), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Hash of the sheet text the plan was read from: a daily re-read skips the
+    # model when nobody edited the sheet.
+    source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # "Do not ask again": reports run without the media plan question.
+    dismissed: Mapped[bool] = mapped_column(Boolean, default=False)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(30))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

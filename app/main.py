@@ -102,7 +102,9 @@ async def run_bot(runtime):
         async def send(chat, text):
             await send_text(bot, chat, text, markdown=True)
 
-        runtime.schedule = DailySchedule(settings, runtime.checks, send, runtime.agent)
+        runtime.schedule = DailySchedule(
+            settings, runtime.checks, send, runtime.agent, runtime.mediaplans
+        )
         commands = [
             ("start", "Начать"),
             ("menu", "Главное меню"),

@@ -21,7 +21,8 @@ async def test_single_client_report_separates_decisions_from_diagnostics(runtime
     technical = detailed(report)
 
     assert "**Показатели** · изменение · сейчас / было" in main
-    assert "Данные:" in main
+    assert "Данные Директа и Метрики получены." in main
+    assert "данных недостаточно" not in main
     assert "Требует внимания" in main or "Рисков не найдено" in main
     assert "HTTP 429" not in main
     assert "HTTP 429" in technical

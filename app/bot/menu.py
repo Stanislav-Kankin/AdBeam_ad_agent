@@ -1,7 +1,7 @@
 """Owner-bound inline navigation over clients authorized for the current chat."""
 
 import secrets
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from time import monotonic
 
@@ -9,10 +9,15 @@ from aiogram import F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.analytics.mediaplan import month_name, plan_fact_text, plan_preview
+from app.analytics.periods import today_moscow
 from app.analytics.rules import main_kpi
 from app.bot.callbacks import answer_callback
+from app.bot.markdown import markdown_parts
 from app.bot.report_message import retry_telegram
+from app.domain.mediaplan import MediaPlan, sheet_location
 from app.domain.reports import CheckMode
+from app.integrations.mediaplan import MediaPlanError
 from app.reporting.data_status import describe_data
 from app.reporting.formatter import fmt_short
 
@@ -77,6 +82,72 @@ def install_menu(router, runtime, launch, launch_chart):
     actions = {}
     awaiting_user = {}
     awaiting_target = {}
+    awaiting_plan = {}
+
+    async def answer_markdown(message, text):
+        for part, entities in markdown_parts(text):
+            await retry_telegram(
+                lambda part=part, entities=entities: message.answer(
+                    part, entities=entities, parse_mode=None, request_timeout=15
+                )
+            )
+
+    @router.message(
+        lambda message: (
+            message.text is not None and (message.chat.id, message.from_user.id) in awaiting_plan
+        )
+    )
+    async def plan_input(message):
+        key = (message.chat.id, message.from_user.id)
+        started, client_id, resume = awaiting_plan.pop(key)
+        user = message.from_user.id
+        if not can_configure(user):
+            return
+        if message.text.strip() in ("/cancel", "/menu", "/start"):
+            await show(message, user)
+            return
+        if monotonic() - started > 600:
+            await message.answer("Время ввода истекло. Откройте «Медиаплан» заново.")
+            return
+        url = message.text.strip()
+        try:
+            sheet_location(url)
+            client = runtime.registry.require(message.chat.id, client_id)
+        except ValueError as exc:
+            awaiting_plan[key] = (started, client_id, resume)
+            await message.answer(f"{exc}. /cancel — отмена.")
+            return
+        except PermissionError:
+            await message.answer("Клиент больше недоступен этому чату.")
+            return
+
+        async def work():
+            await message.answer("Читаю таблицу и разбираю план по месяцам, это до минуты.")
+            try:
+                plan, digest = await runtime.mediaplans.reader.read(url)
+            except MediaPlanError as exc:
+                await message.answer(str(exc))
+                await show(message, user, screen="mediaplan", client_id=client.id)
+                return
+            await show(
+                message,
+                user,
+                screen="mediaplan_confirm",
+                client_id=client.id,
+                data={
+                    "url": url,
+                    "plan": plan.model_dump(mode="json"),
+                    "hash": digest,
+                    "resume": resume,
+                },
+            )
+
+        async def failed():
+            await message.answer("Не удалось прочитать медиаплан. Ошибка записана в журнал.")
+
+        if not runtime.jobs.start((message.chat.id, user), work, failed):
+            awaiting_plan[key] = (started, client_id, resume)
+            await message.answer("Другой запрос уже выполняется. Пришлите ссылку чуть позже.")
 
     async def save_targets(client, targets, user):
         updated = await runtime.checks.repository.save_client_preferences(
@@ -199,7 +270,9 @@ def install_menu(router, runtime, launch, launch_chart):
             if value[5] == screen or monotonic() - value[0] > MENU_TTL:
                 actions.pop(key, None)
 
-    async def show(message, user, screen="home", page=0, client_id=None, mode=None, edit=False):
+    async def show(
+        message, user, screen="home", page=0, client_id=None, mode=None, edit=False, data=None
+    ):
         chat = message.chat.id
         prune()
         clients = runtime.registry.visible(chat)
@@ -362,6 +435,7 @@ def install_menu(router, runtime, launch, launch_chart):
                     mode=CheckMode.SUMMARY,
                 )
                 if client_id:
+                    row("📅 Медиаплан", "mediaplan", client_id=client_id, page=page)
                     row("🗂 Состояние данных", "status", client_id=client_id, page=page)
                     row(
                         "📈 График динамики", "period", client_id=client_id, page=page, mode="chart"
@@ -600,6 +674,65 @@ def install_menu(router, runtime, launch, launch_chart):
                 field="excluded_campaigns",
             )
             row("← К отчёту", "report", client_id=client_id, page=page)
+        elif screen == "mediaplan":
+            client = runtime.registry.require(chat, client_id)
+            record = await runtime.checks.repository.media_plan(client_id) or {}
+            text = badge + f"📅 Медиаплан\n{client.name}\n"
+            if record.get("plan"):
+                plan = MediaPlan.model_validate(record["plan"])
+                current = f"{today_moscow():%Y-%m}"
+                upcoming = [m for m in plan.months if m.month >= current][:2] or plan.months[-2:]
+                text += (
+                    f"\nТаблица: {record['url']}\n"
+                    f"Месяцев в плане: {len(plan.months)} "
+                    f"({month_name(plan.months[0].month)} — {month_name(plan.months[-1].month)})\n"
+                    "Бот перечитывает таблицу раз в сутки: правки в ней подхватятся сами.\n\n"
+                    + plan_preview(plan.model_copy(update={"months": upcoming}))
+                )
+                row("📊 План/факт за месяц", "mediaplan_progress", client_id=client_id)
+            else:
+                text += (
+                    "\nМедиаплан не загружен. С ним отчёт по клиенту покажет выполнение плана "
+                    "месяца: расход и лиды против плана, прогноз на конец месяца и цену лида."
+                )
+            if record.get("error"):
+                text += f"\n\n⚠️ Последнее чтение таблицы: {record['error']}"
+            if can_configure(user):
+                row(
+                    "📎 Заменить ссылку" if record.get("url") else "📎 Добавить ссылку на таблицу",
+                    "enter_mediaplan",
+                    client_id=client_id,
+                )
+                if record.get("url"):
+                    row("🔄 Перечитать таблицу", "mediaplan_refresh", client_id=client_id)
+                    row("🗑 Убрать медиаплан", "mediaplan_remove", client_id=client_id)
+            row("← К отчёту", "report", client_id=client_id, page=page)
+        elif screen == "mediaplan_missing":
+            client = runtime.registry.require(chat, client_id)
+            text = badge + (
+                f"📅 У клиента «{client.name}» нет медиаплана.\n\n"
+                "С ним отчёт покажет выполнение плана месяца: расход и лиды против плана, "
+                "прогноз на конец месяца и цену лида. Нужна ссылка на лист Google Таблицы "
+                "с помесячным планом."
+            )
+            row("📎 Добавить ссылку на медиаплан", "enter_mediaplan", client_id=client_id, **data)
+            row("▶️ Продолжить без медиаплана", "run", client_id=client_id, skip_plan=True, **data)
+            row(
+                "🔕 Не спрашивать по этому клиенту",
+                "mediaplan_dismiss",
+                client_id=client_id,
+                **data,
+            )
+        elif screen == "mediaplan_confirm":
+            client = runtime.registry.require(chat, client_id)
+            plan = MediaPlan.model_validate(data["plan"])
+            text = badge + (
+                f"📅 Медиаплан · {client.name}\n"
+                "Вот что я прочитал из таблицы. Проверьте цифры перед сохранением:\n\n"
+                + plan_preview(plan)
+            )
+            row("✅ Всё верно, сохранить", "mediaplan_save", client_id=client_id, **data)
+            row("❌ Не сохранять", "mediaplan", client_id=client_id)
         elif screen == "schedule":
             if user not in runtime.settings.telegram_admin_user_ids:
                 raise PermissionError
@@ -687,6 +820,11 @@ def install_menu(router, runtime, launch, launch_chart):
                 "set_kpi",
                 "set_tolerance",
                 "enter_target",
+                "enter_mediaplan",
+                "mediaplan_save",
+                "mediaplan_refresh",
+                "mediaplan_remove",
+                "mediaplan_dismiss",
             )
             if (admin_only and user not in runtime.settings.telegram_admin_user_ids) or (
                 configuration and not can_configure(user)
@@ -852,8 +990,92 @@ def install_menu(router, runtime, launch, launch_chart):
                 else f"Пришлите {TARGET_FIELDS[kwargs['field']]} числом, например 2500. "
                 "0 — убрать цель, /cancel — отмена."
             )
+        elif action == "enter_mediaplan":
+            resume = (
+                {"period": kwargs["period"], "mode": kwargs["mode"]}
+                if kwargs.get("period")
+                else None
+            )
+            awaiting_plan[(chat, user)] = (monotonic(), client_id, resume)
+            await callback.message.answer(
+                "Пришлите ссылку на лист Google Таблицы с помесячным планом Директа. Откройте "
+                "нужный лист и скопируйте адрес из браузера: в нём будет «gid=…», по нему бот "
+                "найдёт лист. Доступ к таблице — «Все, у кого есть ссылка» (просмотр). "
+                "/cancel — отмена."
+            )
+        elif action == "mediaplan_save":
+            plan = MediaPlan.model_validate(kwargs["plan"])
+            await runtime.checks.repository.update_media_plan(
+                client_id,
+                actor=user,
+                url=kwargs["url"],
+                plan=plan.model_dump(mode="json"),
+                source_hash=kwargs["hash"],
+                error=None,
+                dismissed=False,
+                checked_at=datetime.now(UTC),
+            )
+            await callback.message.answer("Медиаплан сохранён.")
+            resume = kwargs.get("resume")
+            if resume:
+                await show(callback.message, user, edit=True)
+                await launch(callback.message, user, [client_id], resume["period"], resume["mode"])
+            else:
+                await show(
+                    callback.message, user, screen="mediaplan", client_id=client_id, edit=True
+                )
+        elif action == "mediaplan_dismiss":
+            await runtime.checks.repository.update_media_plan(client_id, actor=user, dismissed=True)
+            await show(callback.message, user, edit=True)
+            await launch(callback.message, user, [client_id], kwargs["period"], kwargs["mode"])
+        elif action == "mediaplan_remove":
+            await runtime.checks.repository.update_media_plan(
+                client_id, actor=user, url=None, plan=None, source_hash=None, error=None
+            )
+            await show(callback.message, user, screen="mediaplan", client_id=client_id, edit=True)
+        elif action in ("mediaplan_refresh", "mediaplan_progress"):
+            client = runtime.registry.require(chat, client_id)
+
+            async def work():
+                if action == "mediaplan_refresh":
+                    await callback.message.answer("Перечитываю таблицу медиаплана.")
+                    await runtime.mediaplans.refresh(client.id, force=True)
+                    await show(callback.message, user, screen="mediaplan", client_id=client.id)
+                    return
+                result = await runtime.mediaplans.progress(client)
+                if result:
+                    await answer_markdown(callback.message, plan_fact_text(result))
+                else:
+                    await callback.message.answer(
+                        "В медиаплане нет текущего месяца: сравнивать не с чем."
+                    )
+
+            async def failed():
+                await callback.message.answer(
+                    "Не удалось обработать медиаплан. Ошибка записана в журнал."
+                )
+
+            if not runtime.jobs.start((chat, user), work, failed):
+                await callback.message.answer("Другой запрос уже выполняется. Попробуйте позже.")
         elif action == "run":
             ids = [client_id] if client_id else [c.id for c in runtime.registry.visible(chat)]
+            if (
+                client_id
+                and kwargs["mode"] != "chart"
+                and not kwargs.get("skip_plan")
+                and can_configure(user)
+            ):
+                record = await runtime.checks.repository.media_plan(client_id) or {}
+                if not record.get("plan") and not record.get("dismissed"):
+                    await show(
+                        callback.message,
+                        user,
+                        screen="mediaplan_missing",
+                        client_id=client_id,
+                        edit=True,
+                        data={"period": kwargs["period"], "mode": kwargs["mode"]},
+                    )
+                    return
             await show(callback.message, user, edit=True)
             if ids:
                 if kwargs["mode"] == "chart":
