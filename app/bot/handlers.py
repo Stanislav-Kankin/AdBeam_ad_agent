@@ -2,9 +2,11 @@ import asyncio
 import logging
 import re
 import secrets
+from datetime import UTC, datetime, time
 from time import monotonic
 
 from aiogram import Dispatcher, F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import (
     BufferedInputFile,
@@ -14,7 +16,7 @@ from aiogram.types import (
 )
 
 from app.analytics.mediaplan import plan_fact_text
-from app.analytics.periods import MOSCOW, AnalysisPeriod, make_period
+from app.analytics.periods import MOSCOW, AnalysisPeriod, make_period, today_moscow
 from app.analytics.progress import progress_state
 from app.analytics.trend import load_trend, summary
 from app.bot.callbacks import answer_callback
@@ -24,7 +26,7 @@ from app.bot.menu import install_menu
 from app.bot.middleware import AccessMiddleware
 from app.bot.report_message import ReportMessage, report_entities, retry_telegram
 from app.domain.reports import CheckMode, ClientReport, TriggerSource
-from app.reporting.balance import balance_text
+from app.reporting.balance import balance_text, feedback_text
 from app.reporting.charts import render_audience, render_dynamics, render_trend
 from app.reporting.formatter import (
     audience_report,
@@ -93,6 +95,68 @@ def build_dispatcher(runtime):
         for key in expired:
             report_details.pop(key, None)
 
+    # 👍/👎 buttons live a day: long enough to rate a report read later.
+    rated = {}
+    awaiting_comment = {}
+
+    def feedback_row(chat_id, user_id, kind, client_id, excerpt):
+        now = monotonic()
+        for key in [k for k, v in rated.items() if now - v[0] > 86400]:
+            rated.pop(key, None)
+        while len(rated) >= 500:
+            rated.pop(next(iter(rated)))
+        token = secrets.token_hex(6)
+        rated[token] = (now, chat_id, user_id, kind, client_id, excerpt[:1000])
+        return [
+            InlineKeyboardButton(text="👍 Полезно", callback_data=f"fb:{token}:1"),
+            InlineKeyboardButton(text="👎 Не то", callback_data=f"fb:{token}:-1"),
+        ]
+
+    @router.callback_query(F.data.startswith("fb:"))
+    async def rate(callback):
+        try:
+            _, token, value = callback.data.split(":", 2)
+            created, chat_id, user_id, kind, client_id, excerpt = rated.pop(token)
+            if chat_id != callback.message.chat.id or user_id != callback.from_user.id:
+                rated[token] = (created, chat_id, user_id, kind, client_id, excerpt)
+                raise ValueError
+        except (KeyError, ValueError):
+            await answer_callback(callback, "Оценка уже учтена или кнопка устарела.")
+            return
+        feedback_id = await runtime.checks.repository.save_feedback(
+            chat_id, user_id, kind, client_id, int(value), excerpt
+        )
+        if value == "1":
+            await answer_callback(callback, "Спасибо! Отметили как полезное.")
+            return
+        await answer_callback(callback)
+        awaiting_comment[(chat_id, user_id)] = (monotonic(), feedback_id)
+        await callback.message.answer(
+            "Что было не так? Напишите одним сообщением, это прочитает разработчик. "
+            "/cancel — пропустить.",
+            parse_mode=None,
+        )
+
+    @router.message(
+        lambda message: (
+            message.text is not None and (message.chat.id, message.from_user.id) in awaiting_comment
+        )
+    )
+    async def feedback_comment(message):
+        started, feedback_id = awaiting_comment.pop((message.chat.id, message.from_user.id))
+        text = message.text.strip()
+        if text.split("@", 1)[0] in ("/cancel", "/menu", "/start") or monotonic() - started > 1800:
+            # Not a comment: let the command or question run as usual.
+            raise SkipHandler
+        await runtime.checks.repository.comment_feedback(feedback_id, text)
+        await message.answer("Спасибо, записал. Разберём и поправим.", parse_mode=None)
+
+    @router.callback_query(F.data == "ctx:switch")
+    async def switch_client(callback):
+        await answer_callback(callback)
+        await runtime.agent.cancel(callback.message.chat.id, callback.from_user.id)
+        await show_menu(callback.message, callback.from_user.id, screen="clients")
+
     def can_configure(user):
         return user in runtime.settings.telegram_admin_user_ids or user in getattr(
             runtime.registry, "user_grants", {}
@@ -145,6 +209,14 @@ def build_dispatcher(runtime):
                                 )
                             ],
                             *snooze,
+                            feedback_row(
+                                message.chat.id,
+                                user_id,
+                                "report",
+                                reports[0].client_id,
+                                f"Отчёт · {reports[0].client_name} · "
+                                f"{reports[0].period.current.label()}",
+                            ),
                         ]
                         # Raw technical detail is for admins; managers do not need it.
                         + (
@@ -631,6 +703,11 @@ def build_dispatcher(runtime):
                 (message.chat.id, message.from_user.id), digest_work, digest_failed
             ):
                 await message.answer("Другой запрос уже выполняется. Попробуйте позже.")
+        elif name == "feedback":
+            if message.from_user.id not in runtime.settings.telegram_admin_user_ids:
+                await message.answer("Команда доступна пользователям из TELEGRAM_ADMIN_USER_IDS.")
+                return
+            await message.answer(await feedback_text(runtime), parse_mode=None)
         elif name == "balance":
             if message.from_user.id not in runtime.settings.telegram_admin_user_ids:
                 await message.answer("Команда доступна пользователям из TELEGRAM_ADMIN_USER_IDS.")
@@ -686,8 +763,38 @@ def build_dispatcher(runtime):
             if not replied and not mentioned:
                 return
 
+        user = message.from_user.id
+        if user not in runtime.settings.telegram_admin_user_ids and runtime.agent.llm:
+            midnight = datetime.combine(today_moscow(), time.min, MOSCOW).astimezone(UTC)
+            limit = runtime.settings.questions_per_user_daily
+            if not await runtime.checks.repository.reserve_question(user, limit, midnight):
+                await message.answer(
+                    f"На сегодня лимит вопросов исчерпан ({limit}). Отчёты и кнопки /menu "
+                    "работают без ограничений, вопросы снова можно задавать завтра.",
+                    parse_mode=None,
+                )
+                return
+
         presentation = ReportMessage(message)
         state = {"stage": "разбираю вопрос и проверяю данные"}
+
+        async def answer_buttons(answer):
+            context = await runtime.checks.repository.conversation(message.chat.id, user)
+            rows = [feedback_row(message.chat.id, user, "answer", None, answer)]
+            try:
+                active = runtime.registry.require(message.chat.id, context["active_client_id"])
+                rows[0] = feedback_row(message.chat.id, user, "answer", active.id, answer)
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"🔄 Сменить клиента · сейчас {active.name}"[:60],
+                            callback_data="ctx:switch",
+                        )
+                    ]
+                )
+            except (KeyError, PermissionError):
+                pass
+            return InlineKeyboardMarkup(inline_keyboard=rows)
 
         async def work():
             token = progress_state.set(state)
@@ -703,7 +810,9 @@ def build_dispatcher(runtime):
                 answer = await runtime.agent.ask(
                     message.text, message.chat.id, message.from_user.id
                 )
-                await presentation.finish(answer, markdown=True)
+                await presentation.finish(
+                    answer, markdown=True, reply_markup=await answer_buttons(answer)
+                )
                 run_after = await runtime.checks.repository.latest_run(
                     message.chat.id, message.from_user.id
                 )

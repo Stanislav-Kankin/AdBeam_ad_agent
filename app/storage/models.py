@@ -72,6 +72,8 @@ class LlmUsage(Base):
     cache_write_tokens: Mapped[int] = mapped_column(Integer)
     output_tokens: Mapped[int] = mapped_column(Integer)
     cost_usd: Mapped[float] = mapped_column(Float)
+    # Who asked; None for scheduled digests and other background calls.
+    user_id: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
 
 class MenuAction(Base):
@@ -210,3 +212,19 @@ class SnoozedRisk(Base):
     until: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[str | None] = mapped_column(String(30))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Feedback(Base):
+    """A 👍/👎 on a bot answer or report, with the comment left after 👎."""
+
+    __tablename__ = "feedback"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    app_mode: Mapped[str] = mapped_column(String(20))
+    chat_id: Mapped[str] = mapped_column(String(30))
+    user_id: Mapped[str] = mapped_column(String(30))
+    kind: Mapped[str] = mapped_column(String(20))
+    client_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rating: Mapped[int] = mapped_column(Integer)
+    excerpt: Mapped[str] = mapped_column(Text, default="")
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)

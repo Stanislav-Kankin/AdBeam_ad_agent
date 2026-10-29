@@ -116,7 +116,8 @@ class ReportMessage:
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
 
-    async def finish(self, text, *, markdown=False):
+    async def finish(self, text, *, markdown=False, reply_markup=None):
+        """Send the result; ``reply_markup`` goes under its last part."""
         # Stop and await animation before editing: late progress cannot overwrite the report.
         await self.stop()
         parts = (
@@ -130,16 +131,20 @@ class ReportMessage:
             try:
                 await retry_telegram(
                     lambda: self.status.edit_text(
-                        parts[0][0], parse_mode=None, entities=parts[0][1]
+                        parts[0][0],
+                        parse_mode=None,
+                        entities=parts[0][1],
+                        reply_markup=reply_markup if len(parts) == 1 else None,
                     )
                 )
                 parts = parts[1:]
             except TelegramBadRequest:
                 # The user may have deleted the progress message.
                 logger.info("Progress message could not be edited; sending report separately")
-        for part, entities in parts:
+        for index, (part, entities) in enumerate(parts):
+            markup = reply_markup if index == len(parts) - 1 else None
             await retry_telegram(
-                lambda part=part, entities=entities: self.message.answer(
-                    part, parse_mode=None, entities=entities
+                lambda part=part, entities=entities, markup=markup: self.message.answer(
+                    part, parse_mode=None, entities=entities, reply_markup=markup
                 )
             )

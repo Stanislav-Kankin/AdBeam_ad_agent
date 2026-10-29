@@ -118,6 +118,7 @@ async def run_bot(runtime):
             ("digest", "Сводка за неделю"),
             ("schedule", "Расписание"),
             ("balance", "Расход на модель"),
+            ("feedback", "Оценки ответов"),
             ("cancel", "Отменить выбор"),
         ]
         dp = build_dispatcher(runtime)

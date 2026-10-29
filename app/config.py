@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     warehouse_interval_seconds: int = Field(default=120, ge=30, le=3600)
     warehouse_dimension_interval_seconds: int = Field(default=30, ge=30, le=3600)
     deepseek_daily_limit: int = Field(default=100, ge=1, le=10000)
+    # Free questions a person may ask a day; menu reports and buttons are not counted.
+    questions_per_user_daily: int = Field(default=30, ge=1, le=1000)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @model_validator(mode="after")

@@ -1,7 +1,9 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select, update
@@ -16,6 +18,7 @@ from app.storage.models import (
     DailySnapshot,
     Delivery,
     DirectDimensionPage,
+    Feedback,
     LlmUsage,
     MediaPlanRecord,
     MenuAction,
@@ -25,6 +28,10 @@ from app.storage.models import (
     SnoozedRisk,
     ToolEvent,
 )
+
+# The person a model call is made for: set when the call is reserved, read when its
+# cost is recorded, so /balance can show the spend by person.
+llm_user: ContextVar[str | None] = ContextVar("llm_user", default=None)
 
 
 def safe_json(value):
@@ -187,6 +194,7 @@ class Repository:
 
     async def reserve_model_call(self, chat_id, user_id, request_id, limit):
         # One bot process per database. Reservation is persisted before the API call.
+        llm_user.set(str(user_id) if user_id is not None else None)
         today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         async with self.model_quota_lock:
             async with self.write_session() as session:
@@ -228,6 +236,7 @@ class Repository:
                     cache_write_tokens=tokens.get("cache_write", 0),
                     output_tokens=tokens.get("output", 0),
                     cost_usd=cost_usd,
+                    user_id=llm_user.get(),
                 )
             )
 
@@ -251,6 +260,99 @@ class Repository:
                 )
             ).one()
         return {"calls": row[0], "cost_usd": float(row[1]), "input": row[2], "output": row[3]}
+
+    async def llm_spend_by_user(self, since):
+        """[(user id or None, cost, calls)], biggest spender first."""
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        LlmUsage.user_id,
+                        func.coalesce(func.sum(LlmUsage.cost_usd), 0.0),
+                        func.count(LlmUsage.id),
+                    )
+                    .where(LlmUsage.app_mode == self.app_mode, LlmUsage.created_at >= since)
+                    .group_by(LlmUsage.user_id)
+                )
+            ).all()
+        return sorted(((r[0], float(r[1]), r[2]) for r in rows), key=lambda r: -r[1])
+
+    async def reserve_question(self, user_id, limit, since):
+        """Count a free question of a person; False once today's limit is used up."""
+        async with self.model_quota_lock:
+            async with self.write_session() as session:
+                used = await session.scalar(
+                    select(func.count())
+                    .select_from(ToolEvent)
+                    .where(
+                        ToolEvent.app_mode == self.app_mode,
+                        ToolEvent.user_id == str(user_id),
+                        ToolEvent.tool == "question",
+                        ToolEvent.created_at >= since,
+                    )
+                )
+                if used >= limit:
+                    return False
+                session.add(
+                    ToolEvent(
+                        request_id=str(uuid4()),
+                        app_mode=self.app_mode,
+                        chat_id=str(user_id),
+                        user_id=str(user_id),
+                        tool="question",
+                        arguments={},
+                        status="ok",
+                        duration_seconds=0,
+                    )
+                )
+                return True
+
+    async def save_feedback(self, chat_id, user_id, kind, client_id, rating, excerpt):
+        async with self.write_session() as session:
+            row = Feedback(
+                app_mode=self.app_mode,
+                chat_id=str(chat_id),
+                user_id=str(user_id),
+                kind=kind,
+                client_id=client_id,
+                rating=rating,
+                excerpt=redact(excerpt or "")[:1000],
+            )
+            session.add(row)
+            await session.flush()
+            return row.id
+
+    async def comment_feedback(self, feedback_id, comment):
+        async with self.write_session() as session:
+            row = await session.get(Feedback, feedback_id)
+            if row is not None and row.app_mode == self.app_mode:
+                row.comment = redact(comment)[:2000]
+
+    async def feedback(self, limit=15):
+        async with self.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(Feedback)
+                    .where(Feedback.app_mode == self.app_mode)
+                    .order_by(Feedback.id.desc())
+                    .limit(limit)
+                )
+            ).all()
+        return [
+            {
+                "id": r.id,
+                "user_id": int(r.user_id),
+                "kind": r.kind,
+                "client_id": r.client_id,
+                "rating": r.rating,
+                "excerpt": r.excerpt,
+                "comment": r.comment,
+                "created_at": r.created_at
+                if r.created_at.tzinfo
+                else r.created_at.replace(tzinfo=UTC),
+            }
+            for r in rows
+        ]
 
     async def save_menu_actions(self, rows):
         if not rows:

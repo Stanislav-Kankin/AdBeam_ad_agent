@@ -20,6 +20,7 @@ from app.domain.reports import CheckMode
 from app.integrations.mediaplan import MediaPlanError
 from app.reporting.data_status import describe_data
 from app.reporting.formatter import fmt_short
+from app.storage.repository import llm_user
 
 PAGE_SIZE = 8
 GOAL_PAGE_SIZE = 7
@@ -122,6 +123,7 @@ def install_menu(router, runtime, launch, launch_chart):
             return
 
         async def work():
+            llm_user.set(str(user))
             await message.answer("Читаю таблицу и разбираю план по месяцам, это до минуты.")
             try:
                 plan, digest = await runtime.mediaplans.reader.read(url)
