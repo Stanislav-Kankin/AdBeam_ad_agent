@@ -90,6 +90,15 @@ async def test_thinking_is_off_and_whole_dialogue_is_cached():
     await provider.close()
 
 
+async def test_request_without_system_prompt_sends_no_empty_block():
+    # The API rejects cache_control on an empty system block (400).
+    create = AsyncMock(return_value=reply(SimpleNamespace(type="text", text="{}")))
+    provider = provider_with(create)
+    await provider.complete([{"role": "user", "content": "q"}], [])
+    assert "system" not in create.await_args.kwargs
+    await provider.close()
+
+
 async def test_model_without_disabled_thinking_still_answers():
     import httpx
     from anthropic import BadRequestError

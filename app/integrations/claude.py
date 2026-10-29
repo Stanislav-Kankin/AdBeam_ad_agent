@@ -108,11 +108,15 @@ class ClaudeProvider:
         request = {
             "model": self.model,
             "max_tokens": 4000,
-            # The tool list and system prompt repeat on every call: cache them too.
-            "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             "tools": to_tools(tools),
             "messages": turns,
         }
+        if system:
+            # The tool list and system prompt repeat on every call: cache them too.
+            # The API rejects cache_control on an empty block.
+            request["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
         try:
             result = await self.client.messages.create(
                 **request, **({"thinking": self.thinking} if self.thinking else {})

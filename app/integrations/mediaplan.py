@@ -49,10 +49,7 @@ PROMPT = """Ты читаешь медиаплан рекламного аген
 - leads_scale_with_budget: true, если написано, что при превышении бюджета план по
   лидам растёт пропорционально.
 - Числа пиши без пробелов, валют и процентов, дробную часть через точку.
-- Если месячного бюджета или лидов в таблице нет, верни {{"error": "что не найдено"}}.
-
-CSV:
-{csv}"""
+- Если месячного бюджета или лидов в таблице нет, верни {{"error": "что не найдено"}}."""
 
 
 class MediaPlanError(Exception):
@@ -145,9 +142,18 @@ class MediaPlanReader:
         if self.llm is None:
             raise MediaPlanError("Модель не подключена: медиаплан прочитать нечем.")
         rows = [line for line in csv_text.splitlines() if line.strip(", \t")]
-        prompt = PROMPT.format(today=today or date.today(), csv="\n".join(rows)[:MAX_PROMPT_CHARS])
-        async with asyncio.timeout(90):
-            reply = await self.llm.complete([{"role": "user", "content": prompt}], [])
+        messages = [
+            {"role": "system", "content": PROMPT.format(today=today or date.today())},
+            {"role": "user", "content": "CSV:\n" + "\n".join(rows)[:MAX_PROMPT_CHARS]},
+        ]
+        try:
+            async with asyncio.timeout(90):
+                reply = await self.llm.complete(messages, [])
+        except Exception as exc:
+            logger.warning("Media plan model call failed (%s: %s)", type(exc).__name__, exc)
+            raise MediaPlanError(
+                "Модель не ответила на разбор таблицы. Попробуйте ещё раз через минуту."
+            ) from exc
         return parse_reply(reply.content or "")
 
     async def read(self, url):

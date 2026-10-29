@@ -91,6 +91,28 @@ async def test_sheet_is_fetched_through_google_redirect_only():
             await MediaPlanReader(http, None).fetch(SHEET)
 
 
+async def test_model_gets_rules_as_system_and_failures_are_explained():
+    seen = []
+
+    class Recorder:
+        async def complete(self, messages, tools):
+            seen.append(messages)
+            return LLMMessage(content=json.dumps(GRAND, ensure_ascii=False))
+
+    plan = await MediaPlanReader(None, Recorder()).extract("Месяц,Бюджет\n,,\nОктябрь,1\n")
+    assert plan.month("2026-10")
+    system, user = seen[0]
+    assert system["role"] == "system" and "Верни только JSON" in system["content"]
+    assert user["content"] == "CSV:\nМесяц,Бюджет\nОктябрь,1"
+
+    class Broken:
+        async def complete(self, messages, tools):
+            raise RuntimeError("400")
+
+    with pytest.raises(MediaPlanError, match="Модель не ответила"):
+        await MediaPlanReader(None, Broken()).extract("Месяц\n")
+
+
 def test_plan_fact_forecasts_month_and_reward_step():
     plan = MediaPlan.model_validate(parse_reply(json.dumps(GRAND)).model_dump(mode="json"))
     # 28 of 31 October days are complete on the 29th.
