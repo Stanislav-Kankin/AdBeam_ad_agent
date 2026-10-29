@@ -749,7 +749,7 @@ def install_menu(router, runtime, launch, launch_chart):
                     + plan_preview(plan.model_copy(update={"months": upcoming}))
                 )
                 lead_goals = record.get("lead_goal_ids") or []
-                attribution = record.get("lead_attribution") or "lastsign"
+                attribution = record.get("lead_attribution") or "LYDC"
                 text += "\n\n**Как считаются лиды**\n" + (
                     f"Цели ({len(lead_goals)}) в визитах из Директа — {ATTRIBUTIONS[attribution]}."
                     if lead_goals
@@ -767,9 +767,10 @@ def install_menu(router, runtime, launch, launch_chart):
                     if lead_goals:
                         row(
                             "⚖️ Атрибуция: "
-                            + {"lastsign": "последний значимый", "LYDC": "переход из Директа"}[
-                                attribution
-                            ],
+                            + {
+                                "LYDC": "последний переход из Директа",
+                                "lastsign": "последний значимый",
+                            }[attribution],
                             "toggle_lead_attribution",
                             client_id=client_id,
                         )
@@ -805,7 +806,8 @@ def install_menu(router, runtime, launch, launch_chart):
             text = badge + (
                 f"🎯 **Цели для лидов · {client.name}**\n"
                 "Какие цели Метрики считать лидами при сравнении с медиапланом. Бот сложит их "
-                "достижения в визитах из Директа (последний значимый переход). Например, для "
+                "достижения в визитах из Директа в Метрике (модель атрибуции — на экране "
+                "медиаплана). Например, для "
                 "звонков — «Клик по номеру телефона», для магазина — «Оформление заказа» и "
                 "избранные цели.\n"
             )
@@ -1129,7 +1131,7 @@ def install_menu(router, runtime, launch, launch_chart):
                 order = ["unknown", "with", "without"]
                 update = {"budget_vat": order[(order.index(current) + 1) % len(order)]}
             else:
-                current = record.get("lead_attribution") or "lastsign"
+                current = record.get("lead_attribution") or "LYDC"
                 update = {"lead_attribution": "LYDC" if current == "lastsign" else "lastsign"}
             await runtime.checks.repository.update_media_plan(client_id, actor=user, **update)
             await show(callback.message, user, screen="mediaplan", edit=True, client_id=client_id)

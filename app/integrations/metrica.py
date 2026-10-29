@@ -154,9 +154,21 @@ class MetricaAdapter:
         }
 
     async def query(
-        self, client, counter_id, start, end, *, metrics, dimensions, filters, sort, limit
+        self,
+        client,
+        counter_id,
+        start,
+        end,
+        *,
+        metrics,
+        dimensions,
+        filters,
+        sort,
+        limit,
+        attribution=None,
     ):
-        """Arbitrary read-only Reporting API query built by the agent (validated upstream)."""
+        """Arbitrary read-only Reporting API query built by the agent (validated upstream).
+        ``attribution`` overrides the client's model for "<attribution>" in names."""
         params = {
             "ids": int(counter_id),
             "date1": str(start),
@@ -165,7 +177,7 @@ class MetricaAdapter:
             "accuracy": "full",
             "lang": "ru",
             "limit": limit,
-            "attribution": ATTRIBUTIONS[client.direct.attribution_model],
+            "attribution": attribution or ATTRIBUTIONS[client.direct.attribution_model],
         }
         if dimensions:
             params["dimensions"] = ",".join(dimensions)

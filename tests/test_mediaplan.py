@@ -294,7 +294,9 @@ async def test_agreed_lead_goals_are_counted_in_metrica_direct_visits(runtime, c
     # 23 goals: two queries (20 + 3 metrics) for the month and for every week,
     # only visits from Direct.
     assert [len(q["metrics"]) for q in queries] == [20, 3] * (1 + len(result.weeks))
-    assert all(q["filters"] == "ym:s:lastsignAdvEngine=='ya_direct'" for q in queries)
+    assert all(q["filters"] == "ym:s:<attribution>AdvEngine=='ya_direct'" for q in queries)
+    # By default leads are read as agencies read them: the last Yandex Direct click.
+    assert all(q["attribution"] == "last_yandex_direct_click" for q in queries)
     assert result.leads == 230 and result.unseen == []
     # Monday–Sunday weeks cover the month to date without gaps.
     first, last = result.weeks[0], result.weeks[-1]
@@ -303,7 +305,7 @@ async def test_agreed_lead_goals_are_counted_in_metrica_direct_visits(runtime, c
     assert all(week[3] == 230 for week in result.weeks)
     text = plan_fact_text(result)
     assert "бот их не видит" not in text and "Цена лида" in text
-    assert "Лиды — достижения 23 целей в визитах из Директа (последний значимый" in text
+    assert "Лиды — достижения 23 целей в визитах из Директа (последний переход из Яндекс" in text
     assert "По целям: цель 100000 10 · цель 100001 10 · ещё 21 цель 210" in text
     assert "**📆 По неделям (пн–вс)**" in text
     assert f"{first[0]:%d.%m}–{first[1]:%d.%m} · расход" in text

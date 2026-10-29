@@ -19,11 +19,15 @@ logger = logging.getLogger(__name__)
 
 # How lead goals are attributed to Direct; Metrica's default report model first.
 ATTRIBUTIONS = {
+    "LYDC": "последний переход из Яндекс Директа, Метрика",
     "lastsign": "последний значимый переход, Метрика",
-    "LYDC": "последний переход из Директа, Директ",
 }
+# Metrica's names of those models. Agencies read Direct leads by the last Direct
+# click: Grand Line's specialist got the same numbers within a day's difference.
+METRICA_MODELS = {"LYDC": "last_yandex_direct_click", "lastsign": "lastsign"}
+DEFAULT_ATTRIBUTION = "LYDC"
 # Visits whose last significant source is a Yandex Direct ad.
-DIRECT_VISITS = "ym:s:lastsignAdvEngine=='ya_direct'"
+DIRECT_VISITS = "ym:s:<attribution>AdvEngine=='ya_direct'"
 # Russian VAT since 2026; Direct reports spend without it.
 VAT = Decimal("1.22")
 MONTHS = (
@@ -161,7 +165,7 @@ def plan_fact(
     today=None,
     main_goal_ids=(),
     lead_goals=None,
-    attribution="lastsign",
+    attribution=DEFAULT_ATTRIBUTION,
     breakdown=None,
 ):
     """Month to date through yesterday; on the 1st that is the whole previous month.
@@ -405,7 +409,7 @@ class MediaPlans:
         if record.get("budget_vat"):
             plan = plan.model_copy(update={"budget_vat": record["budget_vat"]})
         lead_goals = record.get("lead_goal_ids")
-        attribution = record.get("lead_attribution") or "lastsign"
+        attribution = record.get("lead_attribution") or DEFAULT_ATTRIBUTION
         spend, leads, reaches = await self.fact(client, month, lead_goals, attribution)
         breakdown = None
         if reaches:
@@ -446,11 +450,7 @@ class MediaPlans:
             spend, leads = metrics.spend, metrics.conversions
         if lead_goals:
             try:
-                reaches = await (
-                    self.direct_leads(client, period, lead_goals)
-                    if attribution == "LYDC"
-                    else self.metrica_leads(client, period, lead_goals)
-                )
+                reaches = await self.metrica_leads(client, period, lead_goals, attribution)
             except Exception as exc:
                 logger.warning(
                     "Media plan leads failed client=%s (%s)", client.id, type(exc).__name__
@@ -465,11 +465,10 @@ class MediaPlans:
         goals = record.get("lead_goal_ids")
         if not goals:
             return None
-        attribution = record.get("lead_attribution") or "lastsign"
-        count_leads = self.direct_leads if attribution == "LYDC" else self.metrica_leads
+        attribution = record.get("lead_attribution") or DEFAULT_ATTRIBUTION
         try:
-            current = await count_leads(client, period.current, goals)
-            previous = await count_leads(client, period.previous, goals)
+            current = await self.metrica_leads(client, period.current, goals, attribution)
+            previous = await self.metrica_leads(client, period.previous, goals, attribution)
         except Exception as exc:
             logger.warning("Report leads failed client=%s (%s)", client.id, type(exc).__name__)
             return None
@@ -492,34 +491,8 @@ class MediaPlans:
             for goal in counter["goals"] or []
         }
 
-    async def direct_leads(self, client, period, goal_ids):
-        """Goal conversions by Direct's "last Yandex Direct click": the model of
-        Metrica's Direct reports specialists read. Ten goals per Direct report."""
-        model = client.model_copy(
-            update={"direct": client.direct.model_copy(update={"attribution_model": "LYDC"})}
-        )
-        reaches = {goal: Decimal(0) for goal in goal_ids}
-        for start in range(0, len(goal_ids), 10):
-            data = await self.checks.provider.direct_query(
-                model,
-                period.start,
-                period.end,
-                report_type="CUSTOM_REPORT",
-                fields=["Conversions"],
-                filters=None,
-                goals=goal_ids[start : start + 10],
-                order_by=None,
-                limit=10,
-            )
-            for row in data["rows"]:
-                for column, value in row.items():
-                    goal = column.split("_")[1] if column.startswith("Conversions_") else None
-                    if goal in reaches and value not in (None, "", "--"):
-                        reaches[goal] += Decimal(str(value))
-        return reaches
-
-    async def metrica_leads(self, client, period, goal_ids):
-        """Goal → reaches in visits whose last significant source is Direct; None
+    async def metrica_leads(self, client, period, goal_ids, attribution=DEFAULT_ATTRIBUTION):
+        """Goal → reaches in visits attributed to Direct by the chosen model; None
         without a Metrica counter."""
         counters = client.metrica.selected_counter_ids()
         if not counters:
@@ -548,6 +521,7 @@ class MediaPlans:
                     filters=DIRECT_VISITS,
                     sort=None,
                     limit=1,
+                    attribution=METRICA_MODELS[attribution],
                 )
                 for metric, value in data["totals"].items():
                     goal = metric.removeprefix("ym:s:goal").removesuffix("reaches")
