@@ -22,6 +22,7 @@ from app.storage.models import (
     MetricaCounterCatalog,
     Run,
     SnapshotCache,
+    SnoozedRisk,
     ToolEvent,
 )
 
@@ -138,6 +139,51 @@ class Repository:
             if actor is not None:
                 row.updated_by = str(actor)
             row.updated_at = datetime.now(UTC)
+
+    async def snooze_risk(self, client_id, key, label, days, actor):
+        until = datetime.now(UTC) + timedelta(days=days)
+        async with self.write_session() as session:
+            row = await session.get(SnoozedRisk, (self.app_mode, client_id, key[:200]))
+            if row is None:
+                row = SnoozedRisk(app_mode=self.app_mode, client_id=client_id, key=key[:200])
+                session.add(row)
+            row.label, row.until = label[:200], until
+            row.created_by, row.created_at = str(actor), datetime.now(UTC)
+        return until
+
+    async def unsnooze_risk(self, client_id, key):
+        async with self.write_session() as session:
+            await session.execute(
+                delete(SnoozedRisk).where(
+                    SnoozedRisk.app_mode == self.app_mode,
+                    SnoozedRisk.client_id == client_id,
+                    SnoozedRisk.key == key,
+                )
+            )
+
+    async def snoozed_risks(self, client_id):
+        async with self.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(SnoozedRisk)
+                    .where(
+                        SnoozedRisk.app_mode == self.app_mode,
+                        SnoozedRisk.client_id == client_id,
+                        SnoozedRisk.until > datetime.now(UTC),
+                    )
+                    .order_by(SnoozedRisk.until)
+                )
+            ).all()
+        # SQLite gives timestamps back without a zone; they are stored in UTC.
+        return [
+            {
+                "key": r.key,
+                "label": r.label,
+                "until": r.until if r.until.tzinfo else r.until.replace(tzinfo=UTC),
+                "created_by": r.created_by,
+            }
+            for r in rows
+        ]
 
     async def reserve_model_call(self, chat_id, user_id, request_id, limit):
         # One bot process per database. Reservation is persisted before the API call.
@@ -298,6 +344,12 @@ class Repository:
                 delete(ConversationState).where(
                     ConversationState.app_mode == self.app_mode,
                     ConversationState.updated_at < cutoff,
+                )
+            )
+            await session.execute(
+                delete(SnoozedRisk).where(
+                    SnoozedRisk.app_mode == self.app_mode,
+                    SnoozedRisk.until < datetime.now(UTC),
                 )
             )
 

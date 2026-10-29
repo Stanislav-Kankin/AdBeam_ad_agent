@@ -10,7 +10,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.analytics.mediaplan import month_name, plan_fact_text, plan_preview
-from app.analytics.periods import today_moscow
+from app.analytics.periods import MOSCOW, today_moscow
 from app.analytics.rules import main_kpi
 from app.bot.callbacks import answer_callback
 from app.bot.markdown import markdown_parts
@@ -673,6 +673,17 @@ def install_menu(router, runtime, launch, launch_chart):
                 client_id=client_id,
                 field="excluded_campaigns",
             )
+            snoozed = await runtime.checks.repository.snoozed_risks(client_id)
+            if snoozed:
+                text += "\n\nСкрытые риски (кнопка «🔕 Скрыть риск» под отчётом):"
+                for item in snoozed:
+                    text += f"\n• {item['label']} — до {item['until'].astimezone(MOSCOW):%d.%m}"
+                    row(
+                        f"🔔 Вернуть: {item['label']}"[:60],
+                        "unsnooze",
+                        client_id=client_id,
+                        key=item["key"],
+                    )
             row("← К отчёту", "report", client_id=client_id, page=page)
         elif screen == "mediaplan":
             client = runtime.registry.require(chat, client_id)
@@ -834,6 +845,7 @@ def install_menu(router, runtime, launch, launch_chart):
                 "set_kpi",
                 "set_tolerance",
                 "enter_target",
+                "unsnooze",
                 "enter_mediaplan",
                 "mediaplan_save",
                 "mediaplan_refresh",
@@ -994,6 +1006,9 @@ def install_menu(router, runtime, launch, launch_chart):
             field = "kpi" if action == "set_kpi" else "kpi_change_tolerance_percent"
             await save_targets(client, {field: kwargs["value"]}, user)
             await show(callback.message, user, screen="kpi", edit=True, client_id=client.id)
+        elif action == "unsnooze":
+            await runtime.checks.repository.unsnooze_risk(client_id, kwargs["key"])
+            await show(callback.message, user, screen="kpi", edit=True, client_id=client_id)
         elif action == "enter_target":
             awaiting_target[(chat, user)] = (monotonic(), kwargs["client_id"], kwargs["field"])
             await callback.message.answer(

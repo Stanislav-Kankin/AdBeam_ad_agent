@@ -106,6 +106,12 @@ class Signal(BaseModel):
     next_check: str
 
 
+def risk_key(signal) -> str:
+    """Campaign risks are hidden by campaign name, account risks by their kind."""
+    name = (signal.actual or {}).get("name")
+    return f"campaign:{name}"[:200] if name else f"signal:{signal.type}"
+
+
 class ClientReport(BaseModel):
     client_id: str
     client_name: str

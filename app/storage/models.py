@@ -196,3 +196,17 @@ class MediaPlanRecord(Base):
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_by: Mapped[str | None] = mapped_column(String(30))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SnoozedRisk(Base):
+    """A risk a specialist marked as fine for now (e.g. leads are good by CRM)."""
+
+    __tablename__ = "snoozed_risks"
+    app_mode: Mapped[str] = mapped_column(String(20), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # "campaign:<name>" or "signal:<type>"
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    label: Mapped[str] = mapped_column(String(200))
+    until: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_by: Mapped[str | None] = mapped_column(String(30))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

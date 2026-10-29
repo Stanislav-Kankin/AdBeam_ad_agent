@@ -14,7 +14,7 @@ from aiogram.types import (
 )
 
 from app.analytics.mediaplan import plan_fact_text
-from app.analytics.periods import AnalysisPeriod, make_period
+from app.analytics.periods import MOSCOW, AnalysisPeriod, make_period
 from app.analytics.progress import progress_state
 from app.analytics.trend import load_trend, summary
 from app.bot.callbacks import answer_callback
@@ -31,6 +31,7 @@ from app.reporting.formatter import (
     audience_segments,
     campaigns_view,
     detailed,
+    risk_options,
     split_message,
     weekly_digest,
 )
@@ -92,6 +93,11 @@ def build_dispatcher(runtime):
         for key in expired:
             report_details.pop(key, None)
 
+    def can_configure(user):
+        return user in runtime.settings.telegram_admin_user_ids or user in getattr(
+            runtime.registry, "user_grants", {}
+        )
+
     async def offer_details(message, reports, user_id):
         if len(reports) != 1:
             return
@@ -107,6 +113,12 @@ def build_dispatcher(runtime):
             detailed(reports[0]),
             reports[0].client_id,
             reports[0].period.model_dump(mode="json"),
+            risk_options(reports[0]) if can_configure(user_id) else [],
+        )
+        snooze = (
+            [[InlineKeyboardButton(text="🔕 Скрыть риск", callback_data=f"details:{token}:snooze")]]
+            if report_details[token][7]
+            else []
         )
         try:
             await retry_telegram(
@@ -132,6 +144,7 @@ def build_dispatcher(runtime):
                                     callback_data=f"details:{token}:specialist",
                                 )
                             ],
+                            *snooze,
                         ]
                         # Raw technical detail is for admins; managers do not need it.
                         + (
@@ -159,14 +172,25 @@ def build_dispatcher(runtime):
         expire_details()
         try:
             _, token, view = callback.data.split(":", 2)
-            created, chat_id, user_id, specialist, technical, client_id, period_data = (
-                report_details[token]
-            )
+            (
+                created,
+                chat_id,
+                user_id,
+                specialist,
+                technical,
+                client_id,
+                period_data,
+                options,
+            ) = report_details[token]
+            hide = re.fullmatch(r"z(\d)", view)
             if (
                 monotonic() - created > 900
                 or chat_id != callback.message.chat.id
                 or user_id != callback.from_user.id
-                or view not in ("specialist", "technical", "audience", "trend")
+                or (
+                    view not in ("specialist", "technical", "audience", "trend", "snooze")
+                    and not (hide and int(hide[1]) < len(options))
+                )
             ):
                 raise ValueError
         except (KeyError, ValueError):
@@ -175,6 +199,40 @@ def build_dispatcher(runtime):
             )
             return
         await answer_callback(callback)
+        if view == "snooze":
+            await retry_telegram(
+                lambda: callback.message.answer(
+                    "Какой риск скрыть на 7 дней? Он перестанет подсвечиваться в отчётах и "
+                    "сводках этого клиента, цифры кампании останутся. Вернуть можно в "
+                    "«KPI проекта».",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text=f"🔕 {label}"[:60],
+                                    callback_data=f"details:{token}:z{index}",
+                                )
+                            ]
+                            for index, (_, label) in enumerate(options)
+                        ]
+                    ),
+                    request_timeout=15,
+                )
+            )
+            return
+        if hide:
+            key, label = options[int(hide[1])]
+            if not can_configure(callback.from_user.id):
+                return
+            until = await runtime.checks.repository.snooze_risk(
+                client_id, key, label, 7, callback.from_user.id
+            )
+            await callback.message.answer(
+                f"Скрыто до {until.astimezone(MOSCOW):%d.%m}: «{label}». "
+                "Вернуть раньше — «KPI проекта» → «Скрытые риски».",
+                parse_mode=None,
+            )
+            return
         if view == "trend":
             presentation = ReportMessage(callback.message)
 

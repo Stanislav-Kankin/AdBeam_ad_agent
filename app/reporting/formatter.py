@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from app.analytics.periods import DateRange
 from app.analytics.rules import CONTEXT_SIGNALS, VOLUME_SIGNALS
-from app.domain.reports import ClientReport, DirectData
+from app.domain.reports import ClientReport, DirectData, risk_key
 from app.security import redact
 
 ICONS = {"green": "🟢", "yellow": "🟡", "red": "🔴", "unknown": "⚪"}
@@ -200,10 +200,12 @@ def contextual_types(report):
 
 
 def expensive_campaigns(report, limit=3):
-    """Campaigns whose CPA is far above the account average and that carry real spend."""
+    """Campaigns whose CPA is far above the account average and that carry real spend:
+    (risk line, campaign name). Campaigns a specialist hid for now are skipped."""
     account_cpa, spend = report.current.cpa, report.current.spend
     if account_cpa is None or not spend:
         return []
+    hidden = {item["key"] for item in report.targets.get("snoozed") or []}
     target = report.targets.get("target_cpa")
     ceiling = max(Decimal(account_cpa) * Decimal("1.5"), Decimal(str(target or 0)))
     risks = []
@@ -213,13 +215,16 @@ def expensive_campaigns(report, limit=3):
         row_spend = Decimal(str(current.get("spend") or 0))
         if cpa is None or row_spend < Decimal(spend) * Decimal("0.03"):
             continue
-        if Decimal(str(cpa)) < ceiling:
+        if Decimal(str(cpa)) < ceiling or f"campaign:{row['name']}" in hidden:
             continue
         ratio = Decimal(str(cpa)) / Decimal(account_cpa)
         risks.append(
-            f"«{row['name']}»: CPA {value_text('cpa', cpa)} — в {number_text(ratio, 1)} "
-            f"раза выше среднего по аккаунту; расход {value_text('spend', previous.get('spend'))}"
-            f" → {value_text('spend', row_spend)}."
+            (
+                f"«{row['name']}»: CPA {value_text('cpa', cpa)} — в {number_text(ratio, 1)} "
+                f"раза выше среднего по аккаунту; расход "
+                f"{value_text('spend', previous.get('spend'))} → {value_text('spend', row_spend)}.",
+                row["name"],
+            )
         )
     return risks[:limit]
 
@@ -360,6 +365,54 @@ def data_line(report):
     return " ".join(gaps) if gaps else "Данные Директа и Метрики получены."
 
 
+def card_risks(report, limit=3):
+    """The risks a manager's card shows, each with the (key, label) a specialist may
+    hide it by: a campaign by name, an account risk by its kind."""
+    # Account-level volume shifts are already bold in the metrics table above.
+    contextual = contextual_types(report) | TABLE_SIGNALS
+    alerts = [
+        s for s in report.signals if s.type not in contextual and s.type != "tracking" and s.message
+    ]
+
+    def option(signal):
+        name = (signal.actual or {}).get("name")
+        return risk_key(signal), str(name or signal.message)[:60]
+
+    # Order: what happened to the account KPI, then where (expensive campaigns),
+    # then waste. Campaigns without conversions collapse into one line with amounts.
+    waste = [s for s in alerts if s.type == "campaign_without_conversions"]
+    account = [s for s in alerts if s.type != "campaign_without_conversions"]
+    # Only three fit a manager's card: red first, then the project KPI and where it
+    # goes wrong (expensive campaigns, spend without conversions), then the rest
+    # (CPC, budget pacing).
+    kpi_first = [s for s in account if s.level == "red" or s.type in KPI_SIGNALS]
+    rest = [s for s in account if s not in kpi_first]
+    items = [(s.message, [option(s)]) for s in sorted(kpi_first, key=lambda s: s.level != "red")]
+    items += [
+        (text, [(f"campaign:{name}", name[:60])]) for text, name in expensive_campaigns(report)
+    ]
+    if waste:
+        top = sorted(waste, key=lambda s: Decimal(str(s.actual.get("spend") or 0)), reverse=True)
+        items.append((waste_line(report, waste), [option(s) for s in top[:3]]))
+    tracking = next((s for s in report.signals if s.type == "tracking"), None)
+    if tracking:
+        items += [(text, []) for text in tracking.actual.get("reasons", [])[:1]]
+    items += [(s.message, [option(s)]) for s in rest]
+    unique = {}
+    for text, options in items:
+        unique.setdefault(text, options)
+    return list(unique.items())[:limit]
+
+
+def risk_options(report, limit=6):
+    """Risks of the card a specialist may hide for a week, without repeats."""
+    found = {}
+    for _, options in card_risks(report):
+        for key, label in options:
+            found.setdefault(key, label)
+    return list(found.items())[:limit]
+
+
 def card(report: ClientReport, summary: str | None = None) -> str:
     """Main single-client answer: status, KPI, key deltas, concrete risks, data line."""
     kpi = main_metric(report)
@@ -390,33 +443,21 @@ def card(report: ClientReport, summary: str | None = None) -> str:
         lines += [metric_line(report, key) for key in metrics]
     lines += quality_lines(report)
 
-    # Account-level volume shifts are already bold in the metrics table above.
-    contextual = contextual_types(report) | TABLE_SIGNALS
-    alerts = [
-        s for s in report.signals if s.type not in contextual and s.type != "tracking" and s.message
-    ]
-    # Order: what happened to the account KPI, then where (expensive campaigns),
-    # then waste. Campaigns without conversions collapse into one line with amounts.
-    waste = [s for s in alerts if s.type == "campaign_without_conversions"]
-    account = [s for s in alerts if s.type != "campaign_without_conversions"]
-    # Only three fit a manager's card: red first, then the project KPI and where it
-    # goes wrong (expensive campaigns, spend without conversions), then the rest
-    # (CPC, budget pacing).
-    kpi_first = [s for s in account if s.level == "red" or s.type in KPI_SIGNALS]
-    rest = [s for s in account if s not in kpi_first]
-    risks = [s.message for s in sorted(kpi_first, key=lambda s: s.level != "red")]
-    risks += expensive_campaigns(report)
-    if waste:
-        risks.append(waste_line(report, waste))
-    tracking = next((s for s in report.signals if s.type == "tracking"), None)
-    if tracking:
-        risks += tracking.actual.get("reasons", [])[:1]
-    risks += [s.message for s in rest]
-    risks = list(dict.fromkeys(risks))[:3]
+    items = card_risks(report)
+    risks = [text for text, _ in items]
     lines += ["", "**⚠️ Требует внимания**" if risks else "**Рисков не найдено**"]
     lines += [f"{i}. {text}" for i, text in enumerate(risks, 1)]
+    # A high CPA may be the price of good leads; only the specialist knows it from CRM.
+    if any("CPA" in text and options for text, options in items):
+        lines += [
+            "",
+            "💡 Дорогой лид не всегда проблема: если по CRM лиды качественные, скройте "
+            "риск кнопкой «🔕 Скрыть риск» под отчётом.",
+        ]
     context = [
-        s.message for s in report.signals if s.type in contextual - TABLE_SIGNALS and s.message
+        s.message
+        for s in report.signals
+        if s.type in contextual_types(report) - TABLE_SIGNALS and s.message
     ]
     if context:
         lines.append("Контекст: " + " ".join(dict.fromkeys(context[:3])))
@@ -427,6 +468,13 @@ def card(report: ClientReport, summary: str | None = None) -> str:
         footer += f" Кампании со словами {words} в рисках не подсвечиваются."
     if any(v.startswith("Конверсии могут") for v in report.limitations):
         footer += " Конверсии за последние дни ещё дополняются."
+    snoozed = report.targets.get("snoozed") or []
+    if snoozed:
+        names = ", ".join(
+            f"«{item['label']}» (до {item['until'][8:10]}.{item['until'][5:7]})"
+            for item in snoozed[:5]
+        )
+        footer += f" Скрыты специалистом: {names}; вернуть — в «KPI проекта»."
     lines += ["", footer]
     if report.goals_source in ("favorites", "campaigns") and report.main_goal_ids:
         named = [

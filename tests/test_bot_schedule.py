@@ -184,9 +184,13 @@ async def test_single_client_check_offers_on_demand_technical_details(runtime):
             "👥 Аудитория",
             "📋 Кампании: главные изменения",
         ]
-        # User 1 is an admin, so the technical view is offered last.
-        assert offer.reply_markup.inline_keyboard[3][0].text == "⚙️ Технические данные"
-        data = offer.reply_markup.inline_keyboard[3][0].callback_data
+        # User 1 is an admin, so the technical view is offered too.
+        technical = next(
+            row[0]
+            for row in offer.reply_markup.inline_keyboard
+            if row[0].text == "⚙️ Технические данные"
+        )
+        data = technical.callback_data
         callback = CallbackQuery(
             id="details",
             from_user=User(id=1, is_bot=False, first_name="User"),

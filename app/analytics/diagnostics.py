@@ -30,6 +30,7 @@ from app.domain.reports import (
     Snapshot,
     Totals,
     TriggerSource,
+    risk_key,
 )
 from app.reporting.formatter import card, compact
 from app.storage.repository import safe_json
@@ -1132,6 +1133,9 @@ class CheckService:
                                 )
             else:
                 limitations.append("Краткая сводка: детальные разрезы не проверялись.")
+            snoozed = await self.repository.snoozed_risks(client.id)
+            hidden = {item["key"] for item in snoozed}
+            signals = [s for s in signals if risk_key(s) not in hidden]
             signals.sort(key=lambda s: 0 if s.level == "red" else 1)
             if len(signals) > 50:
                 limitations.append(
@@ -1186,6 +1190,10 @@ class CheckService:
                     "target_drr": client.targets.target_drr,
                     "kpi_change_tolerance_percent": client.targets.kpi_change_tolerance_percent,
                     "excluded_campaigns": client.targets.excluded_campaigns,
+                    "snoozed": [
+                        {"key": s["key"], "label": s["label"], "until": str(s["until"].date())}
+                        for s in snoozed
+                    ],
                 },
                 goal_scope=current.metrica.scope,
                 goal_metrics=[
