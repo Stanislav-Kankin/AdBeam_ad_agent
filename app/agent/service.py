@@ -71,9 +71,10 @@ class AgentService:
         active_period = context.get("period")
         phase = "llm"
         analytics_started = False
+        concluding = False
         try:
             async with asyncio.timeout(240):
-                while count <= 8:
+                while True:
                     phase = "llm"
                     if (
                         self.daily_limit is not None
@@ -110,11 +111,24 @@ class AgentService:
                             period=active_period,
                         )
                         return answer
-                    if count + len(reply.calls) > 8:
+                    if concluding:
                         return self.fallback(
                             evidence,
-                            "Достигнут лимит 8 инструментов. Уточните запрос или используйте /check.",
+                            "Достигнут лимит инструментов: сузьте вопрос или используйте /check.",
                         )
+                    if count + len(reply.calls) > 8:
+                        # Out of tool calls: answer from what is gathered instead of
+                        # throwing it away. The unanswered calls are not sent back.
+                        concluding = True
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "Лимит вызовов инструментов на этот вопрос исчерпан. "
+                                "Новые инструменты не вызывай: ответь по уже полученным данным "
+                                "и одной фразой скажи, каких срезов не хватило.",
+                            }
+                        )
+                        continue
                     messages.append(reply.as_dict())
                     for call in reply.calls:
                         count += 1
@@ -142,7 +156,6 @@ class AgentService:
                                 "content": json.dumps(result, ensure_ascii=False),
                             }
                         )
-                return self.fallback(evidence, "Достигнут лимит инструментов.")
         except Exception as exc:
             logger.warning(
                 "Agent stopped request=%s phase=%s error=%s elapsed=%.1fs",

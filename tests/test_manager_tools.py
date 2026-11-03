@@ -235,3 +235,30 @@ async def test_model_gets_the_current_client_list_with_every_question(runtime):
     await runtime.agent.ask("Что нового?", 123456789, 1)
     assert "Доступные пользователю клиенты сейчас" in seen[0]
     assert "Fresh Parfum (логин example-fresh)" in seen[0]
+
+
+async def test_out_of_tool_calls_the_model_answers_from_what_it_gathered(runtime):
+    from app.integrations.deepseek import LLMMessage, ToolCall
+
+    class Greedy:
+        """Asks for three reports at a time until told the calls are over."""
+
+        def __init__(self, obey=True):
+            self.obey, self.calls = obey, 0
+
+        async def complete(self, messages, tools):
+            told = "исчерпан" in str(messages[-1].get("content"))
+            if told and self.obey:
+                return LLMMessage(content="Итог по собранным данным; не хватило аудитории.")
+            self.calls += 1
+            return LLMMessage(
+                calls=[ToolCall(f"c{self.calls}{i}", "list_clients", "{}") for i in range(3)]
+            )
+
+    runtime.agent.llm = Greedy()
+    answer = await runtime.agent.ask("Полный анализ West за октябрь", 123456789, 1)
+    assert "Итог по собранным данным" in answer and "лимит" not in answer.casefold()
+
+    runtime.agent.llm = Greedy(obey=False)
+    answer = await runtime.agent.ask("Полный анализ West за октябрь", 123456789, 1)
+    assert "сузьте вопрос" in answer
