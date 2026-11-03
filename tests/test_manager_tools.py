@@ -166,3 +166,72 @@ async def test_model_spend_is_split_by_person(runtime):
     assert await repo.llm_spend_by_user(datetime(2000, 1, 1, tzinfo=UTC)) == [("42", 0.25, 1)]
     text = await balance_text(runtime)
     assert "По людям с начала месяца:" in text and "Света · 42: $0,25" in text
+
+
+def test_clients_are_found_in_any_case_form_but_not_by_a_lone_common_word():
+    from types import SimpleNamespace
+
+    from app.agent.mentions import mentioned
+
+    def client(id_, name, login, aliases=()):
+        return SimpleNamespace(
+            id=id_, name=name, aliases=list(aliases), direct=SimpleNamespace(client_login=login)
+        )
+
+    clients = [
+        client("bacon", "Тамбовский Бекон", "tambov-bekon"),
+        client("grand", "Grand Line", "ab-grandline"),
+        client("phos", "Phosagro", "ab-phosagro"),
+        client("aroma", "Арома-Бутик", "aroma-butik"),
+    ]
+    cases = {
+        "на какую гео ориентированы кампании у клиента Тамбовский Бекон?": ["bacon"],
+        "что у Тамбовского бекона с CPA": ["bacon"],
+        "а у фосагро?": ["phos"],
+        "сравни Гранд и Фосагро": ["grand", "phos"],
+        "отчёт по ab-grandline": ["grand"],
+        "какой бутик лучше": [],
+        "а с конверсиями?": [],
+    }
+    for text, expected in cases.items():
+        assert mentioned(clients, text) == expected, text
+
+
+async def test_question_about_another_client_switches_and_forgets(runtime):
+    repo = runtime.checks.repository
+    await repo.save_conversation(
+        123456789,
+        1,
+        [{"role": "user", "content": "секрет про West"}],
+        active_client_id="west_export",
+    )
+    session = FakeTelegram()
+    async with Bot(token="555:THIS_IS_A_SYNTHETIC_TEST_TOKEN", session=session) as bot:
+        chat = Chat(runtime, bot, session)
+        await chat.say("Какой расход у Fresh Parfum за 7 дней?")
+        assert any("Переключился на «Fresh Parfum" in text for text in chat.texts())
+        context = await repo.conversation(123456789, 1)
+        assert context["active_client_id"] == "fresh_parfum"
+        assert "секрет про West" not in str(context["messages"])
+
+        # A follow-up without a name, the same client or two clients: no switch.
+        before = len(chat.texts())
+        for text in ("А с конверсиями?", "Fresh Parfum: а CPA?", "Сравни West и Fresh Parfum"):
+            await chat.say(text)
+        assert not any("Переключился" in text for text in chat.texts()[before:])
+
+
+async def test_model_gets_the_current_client_list_with_every_question(runtime):
+    from app.integrations.deepseek import LLMMessage
+
+    seen = []
+
+    class Recorder:
+        async def complete(self, messages, tools):
+            seen.append(messages[0]["content"])
+            return LLMMessage(content="Готово.")
+
+    runtime.agent.llm = Recorder()
+    await runtime.agent.ask("Что нового?", 123456789, 1)
+    assert "Доступные пользователю клиенты сейчас" in seen[0]
+    assert "Fresh Parfum (логин example-fresh)" in seen[0]

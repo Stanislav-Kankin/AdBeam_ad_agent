@@ -41,6 +41,16 @@ class AgentService:
         old = context["messages"]
         system = files("app.agent").joinpath("system_prompt.txt").read_text(encoding="utf-8")
         system += f"\nСегодня по Москве: {today_moscow()}. Режим: {'MOCK, синтетические данные' if self.checks.provider.mock else 'production'}."
+        # The list is fresh on every question: a list quoted earlier in the dialogue
+        # may lack a client granted since then.
+        visible = self.checks.registry.visible(chat_id)
+        system += (
+            "\nДоступные пользователю клиенты сейчас (актуальнее любых перечней в истории "
+            "диалога): "
+            + "; ".join(f"{c.name} (логин {c.direct.client_login})" for c in visible[:60])
+            + (f" и ещё {len(visible) - 60}, см. list_clients" if len(visible) > 60 else "")
+            + ". Если вопрос о другом клиенте из этого списка, отвечай о нём, а не о текущем."
+        )
         active_id = context.get("active_client_id")
         if active_id:
             try:

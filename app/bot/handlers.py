@@ -15,6 +15,7 @@ from aiogram.types import (
     InputMediaPhoto,
 )
 
+from app.agent.mentions import mentioned
 from app.analytics.mediaplan import plan_fact_text
 from app.analytics.periods import MOSCOW, AnalysisPeriod, make_period, today_moscow
 from app.analytics.progress import progress_state
@@ -409,13 +410,25 @@ def build_dispatcher(runtime):
         return name if login.casefold() in name.casefold() else f"{name} · {login}"
 
     def mentioned_clients(text, chat_id):
-        folded = text.casefold()
-        found = []
-        for client in runtime.registry.visible(chat_id):
-            references = [client.name, client.direct.client_login, *client.aliases]
-            if any(len(ref.strip()) >= 3 and ref.casefold() in folded for ref in references):
-                found.append(client.id)
-        return set(found)
+        return set(mentioned(runtime.registry.visible(chat_id), text))
+
+    async def follow_mention(message):
+        """A question naming one other client switches the conversation to it and
+        forgets the previous one, so its numbers cannot leak into the answer."""
+        chat, user = message.chat.id, message.from_user.id
+        named = mentioned(runtime.registry.visible(chat), message.text)
+        if len(named) != 1:
+            return
+        context = await runtime.checks.repository.conversation(chat, user)
+        if context.get("active_client_id") in (None, named[0]):
+            return
+        await runtime.agent.cancel(chat, user)
+        await runtime.checks.repository.save_conversation(chat, user, [], active_client_id=named[0])
+        client = runtime.registry.require(chat, named[0])
+        await message.answer(
+            f"🔄 Переключился на «{client_label(client)}». Разговор о прошлом клиенте забыт.",
+            parse_mode=None,
+        )
 
     async def send_chart(message, client, period, data=None):
         current, previous = data or await runtime.checks.dynamics(client, period)
@@ -800,6 +813,7 @@ def build_dispatcher(runtime):
             token = progress_state.set(state)
             logger.info("Question started message_id=%s", message.message_id)
             try:
+                await follow_mention(message)
                 await presentation.start(state)
                 run_before = await runtime.checks.repository.latest_run(
                     message.chat.id, message.from_user.id
